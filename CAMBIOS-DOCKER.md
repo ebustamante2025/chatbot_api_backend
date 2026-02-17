@@ -138,4 +138,12 @@ Ambos servicios están en la misma red, por eso `api-backend` puede conectarse a
 
 - [DOCKER-BACKEND.md](./DOCKER-BACKEND.md) - Guía completa de Docker
 - [README.md](./README.md) - Documentación general
-- [ESTRUCTURA-CAPAS.md](./ESTRUCTURA-CAPAS.md) - Explicación de capas
+- [ESTRUCTURA-CAPAS.md](./ESTRUCTURA-CAPAS.md) - Explicación de 
+
+
+cuando mirgo tabalas  como recontruir el  contenedor 
+
+PS C:\Users\ebustamante\Desktop\ProyectosDesarrollo\CrmChatBot\apps\api-backend> docker-compose build
+
+PS C:\Users\ebustamante\Desktop\ProyectosDesarrollo\CrmChatBot\apps\api-backend> docker-compose up -d
+

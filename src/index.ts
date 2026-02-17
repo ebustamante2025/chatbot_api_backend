@@ -8,6 +8,9 @@ import conversacionesRouter from './routes/conversaciones.js';
 import mensajesRouter from './routes/mensajes.js';
 import usuariosSoporteRouter from './routes/usuarios-soporte.js';
 import authRouter from './routes/auth.js';
+import temasPreguntasRouter from './routes/temas-preguntas.js';
+import preguntasFrecuentesRouter from './routes/preguntas-frecuentes.js';
+import dashboardRouter from './routes/dashboard.js';
 import { authMiddleware } from './middleware/auth.js';
 import { initSocket } from './socket.js';
 
@@ -67,8 +70,27 @@ app.use('/api/mensajes', (req, res, next) => {
   return authMiddleware(req, res, next);
 }, mensajesRouter);
 
-// Listado de agentes solo con token
-app.use('/api/usuarios-soporte', authMiddleware, usuariosSoporteRouter);
+// Usuarios de soporte: GET sin parámetro es público (listado de agentes), el resto requiere token
+app.use('/api/usuarios-soporte', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  // GET / (listar agentes activos) es público para el chat
+  if (req.method === 'GET' && req.path === '/') return next();
+  return authMiddleware(req, res, next);
+}, usuariosSoporteRouter);
+
+// Dashboard admin: requiere token
+app.use('/api/dashboard', authMiddleware, dashboardRouter);
+
+// Temas de preguntas frecuentes: GET público (frontend FAQ), POST/PUT/DELETE requiere token
+app.use('/api/temas-preguntas', (req, res, next) => {
+  if (req.method === 'GET') return next();
+  return authMiddleware(req, res, next);
+}, temasPreguntasRouter);
+
+// Preguntas frecuentes: GET público (frontend FAQ), POST/PUT/DELETE requiere token
+app.use('/api/preguntas-frecuentes', (req, res, next) => {
+  if (req.method === 'GET') return next();
+  return authMiddleware(req, res, next);
+}, preguntasFrecuentesRouter);
 
 // Ruta raíz - muestra rutas disponibles
 app.get('/', (req, res) => {

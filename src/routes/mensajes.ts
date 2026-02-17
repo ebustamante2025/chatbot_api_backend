@@ -13,7 +13,8 @@ router.get('/conversacion/:conversacion_id', async (req, res) => {
       .select(
         'mensajes.*',
         'contactos.nombre as contacto_nombre',
-        'usuarios_soporte.username as agente_username'
+        'usuarios_soporte.username as agente_username',
+        'usuarios_soporte.nombre_completo as agente_nombre_completo'
       )
       .leftJoin('contactos', 'mensajes.contacto_id', 'contactos.id_contacto')
       .leftJoin('usuarios_soporte', 'mensajes.usuario_id', 'usuarios_soporte.id_usuario')
@@ -123,6 +124,22 @@ router.post('/', async (req, res) => {
       .where('id_conversacion', conversacion_id)
       .update({ ultima_actividad_en: db.raw('now()') });
 
+    // Si el agente envía un mensaje y la conversación está ASIGNADA, pasar a ACTIVA
+    if (tipo_emisor === 'AGENTE' && conversacion.estado === 'ASIGNADA') {
+      await db('conversaciones')
+        .where('id_conversacion', conversacionIdNum)
+        .update({ estado: 'ACTIVA' });
+
+      // Notificar a todos los clientes del cambio de estado
+      const socketIO = getIO();
+      if (socketIO) {
+        socketIO.emit('conversation_updated', {
+          id_conversacion: conversacionIdNum,
+          estado: 'ACTIVA',
+        });
+      }
+    }
+
     // Emitir mensaje en tiempo real vía WebSocket
     const socketIO = getIO();
     if (socketIO) {
@@ -130,14 +147,38 @@ router.post('/', async (req, res) => {
         .select(
           'mensajes.*',
           'contactos.nombre as contacto_nombre',
-          'usuarios_soporte.username as agente_username'
+          'usuarios_soporte.username as agente_username',
+          'usuarios_soporte.nombre_completo as agente_nombre_completo'
         )
         .leftJoin('contactos', 'mensajes.contacto_id', 'contactos.id_contacto')
         .leftJoin('usuarios_soporte', 'mensajes.usuario_id', 'usuarios_soporte.id_usuario')
         .where('mensajes.id_mensaje', mensaje.id_mensaje)
         .first();
       const payload = mensajeConDetalle || mensaje;
+      // Emitir a la sala de la conversación (para agentes con el chat abierto)
       socketIO.to(`conversation:${conversacion_id}`).emit('new_message', payload);
+
+      // Notificar al agente asignado para que vea la actualización en su sidebar
+      if (conversacion.asignada_a_usuario_id) {
+        socketIO.to(`agent:${conversacion.asignada_a_usuario_id}`).emit('conversation_new_activity', {
+          id_conversacion: conversacionIdNum,
+        });
+      }
+
+      // Emitir evento global para dashboards (bot, admin) cuando llegan mensajes BOT o CONTACTO
+      if (tipo_emisor === 'BOT' || tipo_emisor === 'CONTACTO') {
+        socketIO.emit('bot_conversation_activity', {
+          id_conversacion: conversacionIdNum,
+          tipo_emisor,
+        });
+      }
+
+      // Notificar a TODOS los usuarios del CRM para que refresquen su sidebar
+      socketIO.to('crm').emit('crm_activity', {
+        id_conversacion: conversacionIdNum,
+        tipo_emisor,
+      });
+
       console.log(`[WebSocket] Mensaje emitido a conversación ${conversacion_id}`);
     }
 

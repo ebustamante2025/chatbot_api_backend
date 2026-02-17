@@ -137,4 +137,45 @@ router.post('/', async (req, res) => {
   }
 });
 
+// GET / — Listar todas las empresas (admin)
+router.get('/', async (req, res) => {
+  try {
+    const empresas = await db('empresas')
+      .select('id_empresa', 'nit', 'nombre_empresa', 'estado', 'creado_en')
+      .orderBy('id_empresa', 'asc');
+
+    res.json({ empresas, total: empresas.length });
+  } catch (error) {
+    console.error('Error al listar empresas:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// PUT /:id — Actualizar empresa
+router.put('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre_empresa, estado } = req.body;
+
+    const existe = await db('empresas').where({ id_empresa: Number(id) }).first();
+    if (!existe) {
+      return res.status(404).json({ error: 'Empresa no encontrada' });
+    }
+
+    const campos: Record<string, unknown> = {};
+    if (nombre_empresa !== undefined) campos.nombre_empresa = nombre_empresa.trim();
+    if (estado !== undefined) campos.estado = estado;
+
+    const [actualizada] = await db('empresas')
+      .where({ id_empresa: Number(id) })
+      .update(campos)
+      .returning('*');
+
+    res.json({ message: 'Empresa actualizada', empresa: actualizada });
+  } catch (error) {
+    console.error('Error al actualizar empresa:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
 export default router;

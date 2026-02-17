@@ -4,13 +4,15 @@ import { getIO } from '../socket.js';
 
 const router = express.Router();
 
-/** Estados permitidos: solo EN_COLA, ASIGNADA o CERRADA */
-const ESTADOS_CONVERSACION = ['EN_COLA', 'ASIGNADA', 'CERRADA'] as const;
+/** Estados permitidos: EN_COLA, ASIGNADA, ACTIVA, CERRADA */
+const ESTADOS_CONVERSACION = ['EN_COLA', 'ASIGNADA', 'ACTIVA', 'CERRADA'] as const;
 
-// Listar conversaciones (con filtros opcionales)
-router.get('/', async (req, res) => {
+// Listar conversaciones
+// ADMIN/SUPERVISOR ven todas. Otros usuarios ven EN_COLA + las ASIGNADAS a ellos.
+router.get('/', async (req: any, res) => {
   try {
     const { estado, empresa_id } = req.query;
+    const user = req.user as { id_usuario: number; username: string; rol: string } | undefined;
 
     let query = db('conversaciones')
       .select(
@@ -20,7 +22,8 @@ router.get('/', async (req, res) => {
         'contactos.nombre as contacto_nombre',
         'contactos.email as contacto_email',
         'contactos.telefono as contacto_telefono',
-        'usuarios_soporte.username as agente_username'
+        'usuarios_soporte.username as agente_username',
+        'usuarios_soporte.nombre_completo as agente_nombre_completo'
       )
       .leftJoin('empresas', 'conversaciones.empresa_id', 'empresas.id_empresa')
       .leftJoin('contactos', 'conversaciones.contacto_id', 'contactos.id_contacto')
@@ -31,13 +34,22 @@ router.get('/', async (req, res) => {
       if (!ESTADOS_CONVERSACION.includes(estado as (typeof ESTADOS_CONVERSACION)[number])) {
         return res.status(400).json({
           error: 'Estado no válido',
-          message: 'El estado debe ser uno de: EN_COLA, ASIGNADA, CERRADA',
+          message: 'El estado debe ser uno de: EN_COLA, ASIGNADA, ACTIVA, CERRADA',
         });
       }
       query = query.where('conversaciones.estado', estado);
     }
     if (empresa_id && typeof empresa_id === 'string') {
       query = query.where('conversaciones.empresa_id', Number(empresa_id));
+    }
+
+    // Filtro por rol: ADMIN y SUPERVISOR ven todo, los demás solo EN_COLA + sus propias asignadas
+    if (user && user.rol !== 'ADMIN' && user.rol !== 'SUPERVISOR') {
+      const userId = user.id_usuario;
+      query = query.andWhereRaw(
+        '(conversaciones.estado = ? OR conversaciones.asignada_a_usuario_id = ?)',
+        ['EN_COLA', userId]
+      );
     }
 
     const conversaciones = await query;
@@ -68,7 +80,8 @@ router.get('/:id', async (req, res) => {
         'contactos.telefono as contacto_telefono',
         'empresas.nit as empresa_nit',
         'empresas.nombre_empresa as empresa_nombre',
-        'usuarios_soporte.username as agente_username'
+        'usuarios_soporte.username as agente_username',
+        'usuarios_soporte.nombre_completo as agente_nombre_completo'
       )
       .leftJoin('empresas', 'conversaciones.empresa_id', 'empresas.id_empresa')
       .leftJoin('contactos', 'conversaciones.contacto_id', 'contactos.id_contacto')
@@ -87,7 +100,8 @@ router.get('/:id', async (req, res) => {
       .select(
         'mensajes.*',
         'contactos.nombre as contacto_nombre',
-        'usuarios_soporte.username as agente_username'
+        'usuarios_soporte.username as agente_username',
+        'usuarios_soporte.nombre_completo as agente_nombre_completo'
       )
       .leftJoin('contactos', 'mensajes.contacto_id', 'contactos.id_contacto')
       .leftJoin('usuarios_soporte', 'mensajes.usuario_id', 'usuarios_soporte.id_usuario')
@@ -134,13 +148,13 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Evitar duplicados: si el contacto ya tiene una conversación activa (EN_COLA o ASIGNADA), devolverla
+    // Evitar duplicados: si el contacto ya tiene una conversación activa, devolverla
     const existente = await db('conversaciones')
       .where({
         empresa_id: Number(empresa_id),
         contacto_id: Number(contacto_id),
       })
-      .whereIn('estado', ['EN_COLA', 'ASIGNADA'])
+      .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
       .orderBy('creada_en', 'desc')
       .first();
 
@@ -172,7 +186,7 @@ router.post('/', async (req, res) => {
             empresa_id: Number(empresa_id),
             contacto_id: Number(contacto_id),
           })
-          .whereIn('estado', ['EN_COLA', 'ASIGNADA'])
+          .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
           .orderBy('creada_en', 'desc')
           .first();
         if (existente2) {
@@ -267,6 +281,15 @@ router.post('/:id/asignar', async (req, res) => {
       razon: 'Asignación desde CRM',
     });
 
+    // Notificar por WebSocket a todos los clientes
+    const socketIO = getIO();
+    if (socketIO) {
+      socketIO.emit('conversation_updated', {
+        id_conversacion: Number(id),
+        estado: 'ASIGNADA',
+      });
+    }
+
     res.json({
       message: 'Conversación asignada',
       conversacion,
@@ -279,10 +302,128 @@ router.post('/:id/asignar', async (req, res) => {
   }
 });
 
-// Cerrar conversación
+// Transferir conversación a otro agente
+router.post('/:id/transferir', async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const { usuario_destino_id, motivo } = req.body || {};
+    const user = req.user as { id_usuario: number; username: string; rol: string } | undefined;
+
+    if (!usuario_destino_id) {
+      return res.status(400).json({
+        error: 'usuario_destino_id requerido',
+        message: 'Debe indicar el agente destino para la transferencia.',
+      });
+    }
+
+    // Verificar que el agente destino existe y está activo
+    const agenteDestino = await db('usuarios_soporte')
+      .where({ id_usuario: Number(usuario_destino_id), estado: true })
+      .first();
+
+    if (!agenteDestino) {
+      return res.status(400).json({
+        error: 'Agente destino no encontrado',
+        message: 'El usuario destino no existe o no está activo.',
+      });
+    }
+
+    // Verificar que la conversación está ASIGNADA o ACTIVA
+    const conversacionActual = await db('conversaciones')
+      .where('id_conversacion', id)
+      .first();
+
+    if (!conversacionActual) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    if (!['ASIGNADA', 'ACTIVA'].includes(conversacionActual.estado)) {
+      return res.status(400).json({
+        error: 'No se puede transferir',
+        message: 'Solo se pueden transferir conversaciones asignadas o activas.',
+      });
+    }
+
+    // No transferir a sí mismo
+    if (conversacionActual.asignada_a_usuario_id === Number(usuario_destino_id)) {
+      return res.status(400).json({
+        error: 'Transferencia no válida',
+        message: 'La conversación ya está asignada a este agente.',
+      });
+    }
+
+    // Actualizar la conversación: cambiar agente, volver a ASIGNADA, actualizar timestamp
+    const [conversacion] = await db('conversaciones')
+      .where('id_conversacion', id)
+      .update({
+        asignada_a_usuario_id: Number(usuario_destino_id),
+        estado: 'ASIGNADA',
+        asignada_en: db.raw('now()'),
+        ultima_actividad_en: db.raw('now()'),
+      })
+      .returning('*');
+
+    // Registrar en asignaciones
+    await db('asignaciones').insert({
+      empresa_id: conversacion.empresa_id,
+      conversacion_id: conversacion.id_conversacion,
+      usuario_id: Number(usuario_destino_id),
+      accion: 'TRANSFERIR',
+      razon: motivo || `Transferida por ${user?.username || 'agente'}`,
+    });
+
+    // Agregar mensaje de sistema indicando la transferencia
+    const agenteOrigen = user?.username || 'Agente';
+    const textoSistema = `🔄 Conversación transferida de ${agenteOrigen} a ${agenteDestino.nombre_completo || agenteDestino.username}${motivo ? ` — Motivo: ${motivo}` : ''}`;
+    await db('mensajes').insert({
+      empresa_id: conversacion.empresa_id,
+      conversacion_id: Number(id),
+      tipo_emisor: 'SISTEMA',
+      contenido: textoSistema,
+    });
+
+    // Notificar por WebSocket
+    const socketIO = getIO();
+    if (socketIO) {
+      // Notificar globalmente el cambio de estado
+      socketIO.emit('conversation_updated', {
+        id_conversacion: Number(id),
+        estado: 'ASIGNADA',
+        transferida: true,
+        agente_destino_id: Number(usuario_destino_id),
+        agente_origen_id: user?.id_usuario,
+      });
+
+      // Enviar mensaje de sistema a la sala de la conversación
+      socketIO.to(`conversation:${id}`).emit('new_message', {
+        id_mensaje: Date.now(),
+        conversacion_id: Number(id),
+        tipo_emisor: 'SISTEMA',
+        contenido: textoSistema,
+        creado_en: new Date().toISOString(),
+      });
+
+      // Notificar directamente al agente destino para que recargue sus conversaciones
+      socketIO.to(`agent:${usuario_destino_id}`).emit('conversation_assigned', {
+        id_conversacion: Number(id),
+      });
+    }
+
+    res.json({
+      message: 'Conversación transferida',
+      conversacion,
+    });
+  } catch (error) {
+    console.error('Error al transferir conversación:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// Cerrar conversación (simple)
 router.post('/:id/cerrar', async (req, res) => {
   try {
     const { id } = req.params;
+    const { motivo, notas } = req.body || {};
 
     const [conversacion] = await db('conversaciones')
       .where('id_conversacion', id)
@@ -296,6 +437,31 @@ router.post('/:id/cerrar', async (req, res) => {
     if (!conversacion) {
       return res.status(404).json({
         error: 'Conversación no encontrada',
+      });
+    }
+
+    // Si tiene motivo/notas, guardar como mensaje de sistema
+    if (motivo || notas) {
+      const textoSistema = `🔒 Caso cerrado${motivo ? ` — Motivo: ${motivo}` : ''}${notas ? `\nNotas: ${notas}` : ''}`;
+      await db('mensajes').insert({
+        empresa_id: conversacion.empresa_id,
+        conversacion_id: Number(id),
+        tipo_emisor: 'SISTEMA',
+        contenido: textoSistema,
+      });
+    }
+
+    // Notificar por WebSocket que la conversación se cerró
+    const socketIO = getIO();
+    if (socketIO) {
+      socketIO.to(`conversation:${id}`).emit('conversation_closed', {
+        id_conversacion: Number(id),
+        estado: 'CERRADA',
+      });
+      // Notificar globalmente para actualizar dashboards
+      socketIO.emit('conversation_updated', {
+        id_conversacion: Number(id),
+        estado: 'CERRADA',
       });
     }
 
