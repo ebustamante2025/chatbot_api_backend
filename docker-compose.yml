@@ -1,0 +1,86 @@
+# Backend + PostgreSQL - Desplegar PRIMERO (crea la red compartida)
+# Las contraseñas se leen desde .env (copiar .env.example a .env y configurar).
+# NO subas .env a Git.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: crm-chatbot-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - crm-chatbot-network
+    restart: unless-stopped
+
+  api-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: api-backendchatbot:latest
+    container_name: api-backendchatbot
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SSL: "false"
+      PORT: 3001
+      NODE_ENV: production
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      LICENCIA_API_URL: ${LICENCIA_API_URL:-}
+      CODIGO_APLICATIVO: ${CODIGO_APLICATIVO:-1}
+      EDICION_APLICATIVO: ${EDICION_APLICATIVO:-1}
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crm-chatbot-network
+    restart: unless-stopped
+    command: sh -c "npm run migrate:latest && npm start"
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: crm-chatbot-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crm-chatbot-network
+    restart: unless-stopped
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+networks:
+  crm-chatbot-network:
+    name: crm-chatbot-network
+    driver: bridge

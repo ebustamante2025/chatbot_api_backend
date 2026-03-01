@@ -31,6 +31,16 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Asegurar que las respuestas JSON se envíen como UTF-8 (evitar ?? en tildes/ñ en el CRM)
+app.use((_req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function (body: unknown) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return originalJson(body);
+  };
+  next();
+});
+
 // Health check endpoint
 app.get('/health', async (req, res) => {
   const dbConnected = await testConnection();

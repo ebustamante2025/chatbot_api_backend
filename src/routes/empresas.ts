@@ -1,6 +1,7 @@
 import express from 'express';
 import { db } from '../database/connection.js';
 import { validarLicencia } from '../services/licenciaService.js';
+import { MENSAJES_VALIDACION } from '../data/mensajesValidacion.js';
 
 const router = express.Router();
 
@@ -12,19 +13,23 @@ router.get('/verificar/:nit', async (req, res) => {
     if (!nit || nit.trim() === '') {
       return res.status(400).json({
         error: 'NIT requerido',
-        message: 'El NIT es obligatorio',
+        message: MENSAJES_VALIDACION.nitObligatorio,
       });
     }
 
-    // Validar licencia primero
+    // Validar licencia con la API HGInet (ValidarLicencia?IdentificacionEmpresa=nit)
     const validacionLicencia = await validarLicencia(nit.trim());
 
     if (!validacionLicencia.valida) {
-      return res.status(403).json({
+      const body: Record<string, unknown> = {
         error: 'Licencia inválida',
-        message: validacionLicencia.mensaje || 'Licencia vencida',
+        message: validacionLicencia.mensaje || MENSAJES_VALIDACION.clienteSinLicencia,
         licenciaValida: false,
-      });
+      };
+      if (process.env.NODE_ENV !== 'production' && validacionLicencia.detalleError) {
+        body.detalleError = validacionLicencia.detalleError;
+      }
+      return res.status(403).json(body);
     }
 
     // Si la licencia es válida, verificar si la empresa existe en la BD
@@ -32,23 +37,29 @@ router.get('/verificar/:nit', async (req, res) => {
       .where({ nit: nit.trim() })
       .first();
 
-    if (empresa) {
-      return res.json({
-        existe: true,
-        licenciaValida: true,
-        empresa: {
-          id_empresa: empresa.id_empresa,
-          nit: empresa.nit,
-          nombre_empresa: empresa.nombre_empresa,
-          estado: empresa.estado,
-        },
-      });
-    }
+    const nitTrim = nit.trim();
+    const nombreEmpresa =
+      validacionLicencia.clienteNombre?.trim() ||
+      empresa?.nombre_empresa ||
+      `Empresa NIT ${nitTrim}`;
 
-    return res.json({
-      existe: false,
+    const payload: any = {
+      existe: !!empresa,
       licenciaValida: true,
-    });
+      nit: nitTrim,
+      nombre_empresa: nombreEmpresa,
+      contratosVigentes: validacionLicencia.contratosVigentes ?? [],
+      contactosClientes: validacionLicencia.contactosClientes ?? [],
+    };
+    if (empresa) {
+      payload.empresa = {
+        id_empresa: empresa.id_empresa,
+        nit: empresa.nit,
+        nombre_empresa: empresa.nombre_empresa,
+        estado: empresa.estado,
+      };
+    }
+    return res.json(payload);
   } catch (error) {
     console.error('Error al verificar empresa:', error);
     res.status(500).json({
@@ -67,7 +78,7 @@ router.post('/', async (req, res) => {
     if (!nit || nit.trim() === '') {
       return res.status(400).json({
         error: 'NIT requerido',
-        message: 'El NIT es obligatorio',
+        message: MENSAJES_VALIDACION.nitObligatorio,
       });
     }
 
