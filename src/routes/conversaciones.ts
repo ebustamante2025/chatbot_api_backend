@@ -23,11 +23,21 @@ router.get('/', async (req: any, res) => {
         'contactos.email as contacto_email',
         'contactos.telefono as contacto_telefono',
         'usuarios_soporte.username as agente_username',
-        'usuarios_soporte.nombre_completo as agente_nombre_completo'
+        'usuarios_soporte.nombre_completo as agente_nombre_completo',
+        db.raw(
+          '(SELECT MIN(m.creado_en) FROM mensajes m WHERE m.conversacion_id = conversaciones.id_conversacion) AS primer_mensaje_en'
+        )
       )
       .leftJoin('empresas', 'conversaciones.empresa_id', 'empresas.id_empresa')
       .leftJoin('contactos', 'conversaciones.contacto_id', 'contactos.id_contacto')
       .leftJoin('usuarios_soporte', 'conversaciones.asignada_a_usuario_id', 'usuarios_soporte.id_usuario')
+      // Cola por orden de llegada del primer mensaje; si no hay mensajes, por creada_en
+      .orderByRaw("CASE WHEN conversaciones.estado = 'EN_COLA' THEN 0 ELSE 1 END ASC")
+      .orderByRaw(
+        "CASE WHEN conversaciones.estado = 'EN_COLA' THEN COALESCE(" +
+          "(SELECT MIN(m.creado_en) FROM mensajes m WHERE m.conversacion_id = conversaciones.id_conversacion)," +
+          " conversaciones.creada_en) END ASC NULLS LAST"
+      )
       .orderBy('conversaciones.ultima_actividad_en', 'desc');
 
     if (estado && typeof estado === 'string') {
@@ -38,6 +48,9 @@ router.get('/', async (req: any, res) => {
         });
       }
       query = query.where('conversaciones.estado', estado);
+    } else {
+      // Por defecto no mostrar conversaciones cerradas en la lista del CRM
+      query = query.whereNot('conversaciones.estado', 'CERRADA');
     }
     if (empresa_id && typeof empresa_id === 'string') {
       query = query.where('conversaciones.empresa_id', Number(empresa_id));
@@ -63,6 +76,116 @@ router.get('/', async (req: any, res) => {
     res.status(500).json({
       error: 'Error interno del servidor',
       message: 'No se pudieron obtener las conversaciones',
+    });
+  }
+});
+
+// Historial cerradas: una entrada por contacto (agrupa por empresa_id + contacto_id)
+router.get('/historial-cerradas', async (req: any, res) => {
+  try {
+    const user = req.user as { id_usuario: number; rol: string } | undefined;
+    let query = db('conversaciones')
+      .select(
+        'conversaciones.id_conversacion',
+        'conversaciones.empresa_id',
+        'conversaciones.contacto_id',
+        'conversaciones.cerrada_en',
+        'conversaciones.ultima_actividad_en',
+        'conversaciones.creada_en',
+        'empresas.nombre_empresa as empresa_nombre',
+        'empresas.nit as empresa_nit',
+        'contactos.nombre as contacto_nombre',
+        'contactos.email as contacto_email',
+        'contactos.telefono as contacto_telefono',
+        'usuarios_soporte.username as agente_username',
+        'usuarios_soporte.nombre_completo as agente_nombre_completo'
+      )
+      .leftJoin('empresas', 'conversaciones.empresa_id', 'empresas.id_empresa')
+      .leftJoin('contactos', 'conversaciones.contacto_id', 'contactos.id_contacto')
+      .leftJoin('usuarios_soporte', 'conversaciones.asignada_a_usuario_id', 'usuarios_soporte.id_usuario')
+      .where('conversaciones.estado', 'CERRADA')
+      .orderBy('conversaciones.cerrada_en', 'desc');
+
+    if (user && user.rol !== 'ADMIN' && user.rol !== 'SUPERVISOR') {
+      query = query.where('conversaciones.asignada_a_usuario_id', user.id_usuario);
+    }
+
+    const filas = await query;
+    const porContacto = new Map<string, typeof filas[0]>();
+    for (const row of filas) {
+      const key = `${row.empresa_id}|${row.contacto_id}`;
+      if (!porContacto.has(key)) porContacto.set(key, row);
+    }
+    const conversaciones = Array.from(porContacto.values());
+    res.json({ conversaciones });
+  } catch (error) {
+    console.error('Error al listar historial cerradas:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'No se pudo obtener el historial',
+    });
+  }
+});
+
+// Historial completo de un contacto: todos los mensajes en lista plana (sin bloques)
+router.get('/historial-contacto/:empresaId/:contactoId', async (req, res) => {
+  try {
+    const empresaId = Number(req.params.empresaId);
+    const contactoId = Number(req.params.contactoId);
+    if (!empresaId || !contactoId) {
+      return res.status(400).json({ error: 'empresaId y contactoId son requeridos' });
+    }
+
+    const conversaciones = await db('conversaciones')
+      .select('conversaciones.id_conversacion')
+      .where('conversaciones.estado', 'CERRADA')
+      .where('conversaciones.empresa_id', empresaId)
+      .where('conversaciones.contacto_id', contactoId);
+
+    if (conversaciones.length === 0) {
+      const [contacto] = await db('contactos').select('nombre as contacto_nombre').where('id_contacto', contactoId).limit(1);
+      const [empresa] = await db('empresas').select('nombre_empresa as empresa_nombre', 'nit as empresa_nit').where('id_empresa', empresaId).limit(1);
+      return res.json({
+        contacto_nombre: contacto?.contacto_nombre ?? 'Contacto',
+        empresa_nombre: empresa?.empresa_nombre ?? '—',
+        empresa_nit: empresa?.empresa_nit ?? null,
+        mensajes: [],
+      });
+    }
+
+    const ids = conversaciones.map((c) => c.id_conversacion);
+    const mensajes = await db('mensajes')
+      .select(
+        'mensajes.id_mensaje',
+        'mensajes.conversacion_id',
+        'mensajes.tipo_emisor',
+        'mensajes.contenido',
+        'mensajes.creado_en',
+        'contactos.nombre as contacto_nombre',
+        'usuarios_soporte.username as agente_username',
+        'usuarios_soporte.nombre_completo as agente_nombre_completo'
+      )
+      .leftJoin('contactos', 'mensajes.contacto_id', 'contactos.id_contacto')
+      .leftJoin('usuarios_soporte', 'mensajes.usuario_id', 'usuarios_soporte.id_usuario')
+      .whereIn('mensajes.conversacion_id', ids)
+      .orderBy('mensajes.creado_en', 'asc');
+
+    const [contacto] = await db('contactos').select('nombre as contacto_nombre', 'email as contacto_email', 'telefono as contacto_telefono').where('id_contacto', contactoId).limit(1);
+    const [empresa] = await db('empresas').select('nombre_empresa as empresa_nombre', 'nit as empresa_nit').where('id_empresa', empresaId).limit(1);
+
+    res.json({
+      contacto_nombre: contacto?.contacto_nombre ?? 'Contacto',
+      contacto_email: contacto?.contacto_email ?? null,
+      contacto_telefono: contacto?.contacto_telefono ?? null,
+      empresa_nombre: empresa?.empresa_nombre ?? '—',
+      empresa_nit: empresa?.empresa_nit ?? null,
+      mensajes,
+    });
+  } catch (error) {
+    console.error('Error al obtener historial contacto:', error);
+    res.status(500).json({
+      error: 'Error interno del servidor',
+      message: 'No se pudo obtener el historial del contacto',
     });
   }
 });
@@ -121,8 +244,22 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// Helper: obtener mensajes de una conversación (para incluir historial en respuestas al widget)
+async function obtenerMensajesConversacion(conversacionId: number) {
+  return db('mensajes')
+    .select(
+      'mensajes.id_mensaje',
+      'mensajes.contenido',
+      'mensajes.tipo_emisor',
+      'mensajes.creado_en'
+    )
+    .where('mensajes.conversacion_id', conversacionId)
+    .orderBy('mensajes.creado_en', 'asc');
+}
+
 // Crear conversación (cuando contacto elige "Chatear con agente")
 // Un contacto solo puede tener una conversación activa (EN_COLA o ASIGNADA) a la vez; si ya existe, se devuelve esa.
+// Se incluyen mensajes para que el widget muestre el historial mientras la conversación esté activa.
 router.post('/', async (req, res) => {
   try {
     const { empresa_id, contacto_id, canal = 'WEB', tema = 'SOPORTE' } = req.body;
@@ -148,7 +285,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Evitar duplicados: si el contacto ya tiene una conversación activa, devolverla
+    // Evitar duplicados: si el contacto ya tiene una conversación activa, devolverla con historial
     const existente = await db('conversaciones')
       .where({
         empresa_id: Number(empresa_id),
@@ -159,9 +296,10 @@ router.post('/', async (req, res) => {
       .first();
 
     if (existente) {
+      const mensajes = await obtenerMensajesConversacion(existente.id_conversacion);
       return res.status(200).json({
         message: 'Conversación existente',
-        conversacion: existente,
+        conversacion: { ...existente, mensajes },
       });
     }
 
@@ -190,9 +328,10 @@ router.post('/', async (req, res) => {
           .orderBy('creada_en', 'desc')
           .first();
         if (existente2) {
+          const mensajes2 = await obtenerMensajesConversacion(existente2.id_conversacion);
           return res.status(200).json({
             message: 'Conversación existente',
-            conversacion: existente2,
+            conversacion: { ...existente2, mensajes: mensajes2 },
           });
         }
       }
@@ -207,7 +346,7 @@ router.post('/', async (req, res) => {
 
     res.status(201).json({
       message: 'Conversación creada',
-      conversacion,
+      conversacion: { ...conversacion, mensajes: [] },
     });
   } catch (error: unknown) {
     console.error('Error al crear conversación:', error);
@@ -281,6 +420,19 @@ router.post('/:id/asignar', async (req, res) => {
       razon: 'Asignación desde CRM',
     });
 
+    // Enviar mensaje de presentación automático al chat (solo en "Chatear con un agente")
+    const nombreAgente = agente.nombre_completo?.trim() || agente.username || 'Soporte';
+    const textoPresentacion = `Hola, soy ${nombreAgente}, ¿en qué puedo ayudarte?`;
+    const [mensajePresentacion] = await db('mensajes')
+      .insert({
+        empresa_id: conversacion.empresa_id,
+        conversacion_id: conversacion.id_conversacion,
+        tipo_emisor: 'AGENTE',
+        usuario_id: Number(usuario_id),
+        contenido: textoPresentacion,
+      })
+      .returning('*');
+
     // Notificar por WebSocket a todos los clientes
     const socketIO = getIO();
     if (socketIO) {
@@ -288,11 +440,28 @@ router.post('/:id/asignar', async (req, res) => {
         id_conversacion: Number(id),
         estado: 'ASIGNADA',
       });
+      // Emitir el mensaje de presentación para que aparezca en el widget y en el CRM
+      if (mensajePresentacion) {
+        const presentacionConDetalle = await db('mensajes')
+          .select(
+            'mensajes.*',
+            'contactos.nombre as contacto_nombre',
+            'usuarios_soporte.username as agente_username',
+            'usuarios_soporte.nombre_completo as agente_nombre_completo'
+          )
+          .leftJoin('contactos', 'mensajes.contacto_id', 'contactos.id_contacto')
+          .leftJoin('usuarios_soporte', 'mensajes.usuario_id', 'usuarios_soporte.id_usuario')
+          .where('mensajes.id_mensaje', mensajePresentacion.id_mensaje)
+          .first();
+        socketIO.to(`conversation:${Number(id)}`).emit('new_message', presentacionConDetalle || mensajePresentacion);
+        socketIO.to('crm').emit('crm_activity', { id_conversacion: Number(id), tipo_emisor: 'AGENTE' });
+      }
     }
 
     res.json({
       message: 'Conversación asignada',
       conversacion,
+      mensajePresentacion: mensajePresentacion ?? undefined,
     });
   } catch (error) {
     console.error('Error al asignar conversación:', error);
@@ -419,6 +588,9 @@ router.post('/:id/transferir', async (req: any, res) => {
   }
 });
 
+const MENSAJE_CIERRE_SOPORTE =
+  'Muchas gracias por haberse comunicado con el área de soporte de HGI. Fue un gusto atenderle. Hasta una próxima oportunidad.';
+
 // Cerrar conversación (simple)
 router.post('/:id/cerrar', async (req, res) => {
   try {
@@ -440,7 +612,17 @@ router.post('/:id/cerrar', async (req, res) => {
       });
     }
 
-    // Si tiene motivo/notas, guardar como mensaje de sistema
+    // Mensaje de despedida al cliente (siempre)
+    const [mensajeDespedida] = await db('mensajes')
+      .insert({
+        empresa_id: conversacion.empresa_id,
+        conversacion_id: Number(id),
+        tipo_emisor: 'SISTEMA',
+        contenido: MENSAJE_CIERRE_SOPORTE,
+      })
+      .returning('*');
+
+    // Si tiene motivo/notas, guardar como mensaje de sistema interno
     if (motivo || notas) {
       const textoSistema = `🔒 Caso cerrado${motivo ? ` — Motivo: ${motivo}` : ''}${notas ? `\nNotas: ${notas}` : ''}`;
       await db('mensajes').insert({
@@ -451,14 +633,20 @@ router.post('/:id/cerrar', async (req, res) => {
       });
     }
 
-    // Notificar por WebSocket que la conversación se cerró
+    // Notificar por WebSocket: primero el mensaje de despedida para que el widget lo muestre
     const socketIO = getIO();
     if (socketIO) {
+      if (mensajeDespedida) {
+        socketIO.to(`conversation:${id}`).emit('new_message', {
+          ...mensajeDespedida,
+          tipo_emisor: 'SISTEMA',
+        });
+      }
       socketIO.to(`conversation:${id}`).emit('conversation_closed', {
         id_conversacion: Number(id),
         estado: 'CERRADA',
+        mensaje_cierre: MENSAJE_CIERRE_SOPORTE,
       });
-      // Notificar globalmente para actualizar dashboards
       socketIO.emit('conversation_updated', {
         id_conversacion: Number(id),
         estado: 'CERRADA',

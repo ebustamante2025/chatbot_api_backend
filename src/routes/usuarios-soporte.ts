@@ -10,7 +10,7 @@ router.get('/', async (req, res) => {
     const { todos } = req.query;
 
     let query = db('usuarios_soporte')
-      .select('id_usuario', 'username', 'nombre_completo', 'rol', 'nivel', 'estado', 'tipo_documento', 'documento', 'creado_en')
+      .select('id_usuario', 'username', 'nombre_completo', 'rol', 'nivel', 'estado', 'tipo_documento', 'documento', 'creado_en', 'vistas_permitidas')
       .orderBy('id_usuario', 'asc');
 
     if (!todos) {
@@ -37,7 +37,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const usuario = await db('usuarios_soporte')
-      .select('id_usuario', 'username', 'nombre_completo', 'rol', 'nivel', 'estado', 'tipo_documento', 'documento', 'creado_en')
+      .select('id_usuario', 'username', 'nombre_completo', 'rol', 'nivel', 'estado', 'tipo_documento', 'documento', 'creado_en', 'vistas_permitidas')
       .where({ id_usuario: Number(id) })
       .first();
 
@@ -56,7 +56,7 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { username, nombre_completo, rol, nivel, estado, tipo_documento, documento } = req.body;
+    const { username, nombre_completo, rol, nivel, estado, tipo_documento, documento, vistas_permitidas } = req.body;
 
     const existe = await db('usuarios_soporte').where({ id_usuario: Number(id) }).first();
     if (!existe) {
@@ -64,26 +64,47 @@ router.put('/:id', async (req, res) => {
     }
 
     const campos: Record<string, unknown> = {};
-    if (username !== undefined) campos.username = username.trim();
-    if (nombre_completo !== undefined) campos.nombre_completo = nombre_completo.trim();
+    if (username !== undefined) campos.username = String(username).trim();
+    if (nombre_completo !== undefined) campos.nombre_completo = nombre_completo == null ? null : String(nombre_completo).trim();
     if (rol !== undefined) campos.rol = rol;
     if (nivel !== undefined) campos.nivel = nivel;
     if (estado !== undefined) campos.estado = estado;
     if (tipo_documento !== undefined) campos.tipo_documento = tipo_documento;
     if (documento !== undefined) campos.documento = documento;
+    // Asegurar que vistas_permitidas sea siempre un array de strings o null (PostgreSQL json exige JSON válido)
+    if (vistas_permitidas !== undefined) {
+      let valor: string[] | null = null;
+      if (Array.isArray(vistas_permitidas)) {
+        valor = vistas_permitidas.filter((v): v is string => typeof v === 'string');
+      } else if (vistas_permitidas && typeof vistas_permitidas === 'object' && !Array.isArray(vistas_permitidas)) {
+        const obj = vistas_permitidas as Record<string, unknown>;
+        valor = Object.keys(obj).filter((k) => obj[k]);
+      }
+      // En PostgreSQL el tipo json acepta un string JSON; el driver a veces no serializa bien arrays
+      campos.vistas_permitidas = valor === null ? null : JSON.stringify(valor);
+    }
 
     const [actualizado] = await db('usuarios_soporte')
       .where({ id_usuario: Number(id) })
       .update(campos)
-      .returning(['id_usuario', 'username', 'nombre_completo', 'rol', 'nivel', 'estado', 'tipo_documento', 'documento', 'creado_en']);
+      .returning(['id_usuario', 'username', 'nombre_completo', 'rol', 'nivel', 'estado', 'tipo_documento', 'documento', 'creado_en', 'vistas_permitidas']);
 
+    // Asegurar que vistas_permitidas llegue como array o null al frontend
+    if (actualizado && typeof actualizado.vistas_permitidas === 'string') {
+      try {
+        actualizado.vistas_permitidas = JSON.parse(actualizado.vistas_permitidas as string);
+      } catch {
+        actualizado.vistas_permitidas = null;
+      }
+    }
     res.json({ message: 'Usuario actualizado', usuario: actualizado });
   } catch (error: any) {
     console.error('Error al actualizar usuario:', error);
     if (error.code === '23505') {
       return res.status(409).json({ error: 'Ya existe un usuario con ese username' });
     }
-    res.status(500).json({ error: 'Error interno del servidor' });
+    const message = error?.message || error?.detail || 'Error interno del servidor';
+    res.status(500).json({ error: 'Error interno del servidor', message });
   }
 });
 

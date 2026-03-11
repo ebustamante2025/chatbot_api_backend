@@ -44,20 +44,27 @@ export function initSocket(server: HttpServer): Server {
       }
     });
 
-    // Indicador "está escribiendo": reenviar a la sala para que el CRM vea la vista previa en vivo
-    socket.on('typing', (data: { conversacionId: number; quien: 'contacto' | 'agente'; username?: string; texto?: string }) => {
+    // Indicador "está escribiendo": reenviar a la sala para que el CRM vea la vista previa en vivo.
+    // Usar io.to(room) para que todos en la sala (incl. CRM) reciban aunque el widget no esté en la sala aún.
+    socket.on('typing', (data: { conversacionId: number; quien?: 'contacto' | 'agente'; username?: string; texto?: string }) => {
       const { conversacionId, quien, username, texto } = data || {};
       const id = conversacionId != null ? Number(conversacionId) : NaN;
-      if (!Number.isNaN(id)) {
+      if (!Number.isNaN(id) && io) {
         const room = `conversation:${id}`;
-        socket.to(room).emit('user_typing', { quien, username, texto });
+        io.to(room).emit('user_typing', { quien: quien || 'contacto', username, texto });
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[WebSocket] typing →', room, quien || 'contacto', texto ? `"${String(texto).slice(0, 30)}..."` : '');
+        }
       }
     });
 
     socket.on('typing_stop', (data: { conversacionId: number }) => {
       const id = data?.conversacionId != null ? Number(data.conversacionId) : NaN;
-      if (!Number.isNaN(id)) {
-        socket.to(`conversation:${id}`).emit('user_typing_stop');
+      if (!Number.isNaN(id) && io) {
+        io.to(`conversation:${id}`).emit('user_typing_stop');
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[WebSocket] typing_stop →', `conversation:${id}`);
+        }
       }
     });
   });

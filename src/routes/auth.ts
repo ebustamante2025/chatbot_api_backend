@@ -190,7 +190,7 @@ router.get('/me', authMiddleware, async (req: Request & { user?: { id_usuario: n
     }
     const usuario = await db('usuarios_soporte')
       .where({ id_usuario: user.id_usuario, estado: true })
-      .select('id_usuario', 'username', 'nombre_completo', 'rol')
+      .select('id_usuario', 'username', 'nombre_completo', 'rol', 'vistas_permitidas')
       .first();
     if (!usuario) {
       return res.status(401).json({ error: 'Usuario no encontrado o inactivo' });

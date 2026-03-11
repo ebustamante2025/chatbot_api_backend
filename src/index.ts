@@ -10,7 +10,9 @@ import usuariosSoporteRouter from './routes/usuarios-soporte.js';
 import authRouter from './routes/auth.js';
 import temasPreguntasRouter from './routes/temas-preguntas.js';
 import preguntasFrecuentesRouter from './routes/preguntas-frecuentes.js';
+import faqAccesoRouter from './routes/faq-acceso.js';
 import dashboardRouter from './routes/dashboard.js';
+import webhookProxyRouter from './routes/webhook-proxy.js';
 import { authMiddleware } from './middleware/auth.js';
 import { initSocket } from './socket.js';
 
@@ -19,13 +21,17 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3004;
 
-// CORS - Debe estar ANTES de otros middlewares
-app.use(cors({
-  origin: '*', // En producción, especifica los orígenes permitidos
+// CORS: en producción usar CORS_ORIGINS (lista separada por comas). Si no está definido, permitir todos (desarrollo).
+const corsOrigin = process.env.CORS_ORIGINS;
+const corsOptions = {
+  origin: corsOrigin
+    ? corsOrigin.split(',').map((o) => o.trim()).filter(Boolean)
+    : '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
-  credentials: false
-}));
+  credentials: false,
+};
+app.use(cors(corsOptions));
 
 // Middleware
 app.use(express.json());
@@ -74,9 +80,10 @@ app.use('/api/conversaciones', (req: express.Request, res: express.Response, nex
   return authMiddleware(req, res, next);
 }, conversacionesRouter);
 
-// Rutas de mensajes: POST público (widget envía mensajes), GET requiere token
+// Rutas de mensajes: POST público (widget); PUT/DELETE a /contacto/:id público (widget edita/elimina); resto requiere token
 app.use('/api/mensajes', (req, res, next) => {
   if (req.method === 'POST') return next();
+  if ((req.method === 'PUT' || req.method === 'DELETE') && /^\/contacto\/\d+$/.test(req.path)) return next();
   return authMiddleware(req, res, next);
 }, mensajesRouter);
 
@@ -102,6 +109,12 @@ app.use('/api/preguntas-frecuentes', (req, res, next) => {
   return authMiddleware(req, res, next);
 }, preguntasFrecuentesRouter);
 
+// Acceso a FAQ: validación NIT + usuario (widget obtiene token, front FAQ valida)
+app.use('/api/faq-acceso', faqAccesoRouter);
+
+// Proxy de webhooks externos (agente Isa): evita CORS desde el widget
+app.use('/api/webhook-proxy', webhookProxyRouter);
+
 // Ruta raíz - muestra rutas disponibles
 app.get('/', (req, res) => {
   res.json({
@@ -118,6 +131,10 @@ app.get('/', (req, res) => {
         verificar: 'GET /api/contactos/verificar/:empresa_id/:documento - Verificar si contacto existe por cédula',
         crear: 'POST /api/contactos - Crear nuevo contacto',
         listar: 'GET /api/contactos/empresa/:empresa_id - Listar contactos de una empresa',
+      },
+      faqAcceso: {
+        emitirToken: 'POST /api/faq-acceso - Body: { empresaId, contactoId }. Emite token para acceso a FAQ',
+        validar: 'GET /api/faq-acceso/validar?token=xxx - Valida token de acceso FAQ',
       },
     },
   });
