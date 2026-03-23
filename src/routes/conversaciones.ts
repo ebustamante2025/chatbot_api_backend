@@ -11,7 +11,7 @@ const ESTADOS_CONVERSACION = ['EN_COLA', 'ASIGNADA', 'ACTIVA', 'CERRADA'] as con
 // ADMIN/SUPERVISOR ven todas. Otros usuarios ven EN_COLA + las ASIGNADAS a ellos.
 router.get('/', async (req: any, res) => {
   try {
-    const { estado, empresa_id } = req.query;
+    const { estado, empresa_id, canal } = req.query;
     const user = req.user as { id_usuario: number; username: string; rol: string } | undefined;
 
     let query = db('conversaciones')
@@ -54,6 +54,10 @@ router.get('/', async (req: any, res) => {
     }
     if (empresa_id && typeof empresa_id === 'string') {
       query = query.where('conversaciones.empresa_id', Number(empresa_id));
+    }
+
+    if (canal && typeof canal === 'string' && canal.trim()) {
+      query = query.where('conversaciones.canal', canal.trim().slice(0, 30));
     }
 
     // Filtro por rol: ADMIN y SUPERVISOR ven todo, los demás solo EN_COLA + sus propias asignadas
@@ -257,8 +261,8 @@ async function obtenerMensajesConversacion(conversacionId: number) {
     .orderBy('mensajes.creado_en', 'asc');
 }
 
-// Crear conversación (cuando contacto elige "Chatear con agente")
-// Un contacto solo puede tener una conversación activa (EN_COLA o ASIGNADA) a la vez; si ya existe, se devuelve esa.
+// Crear conversación (widget: Isa WEB_ISA, agente WEB_AGENTE, etc.)
+// Una conversación activa por (empresa, contacto, canal); si ya existe para ese canal, se devuelve con historial.
 // Se incluyen mensajes para que el widget muestre el historial mientras la conversación esté activa.
 router.post('/', async (req, res) => {
   try {
@@ -270,6 +274,9 @@ router.post('/', async (req, res) => {
         message: 'empresa_id y contacto_id son obligatorios',
       });
     }
+
+    /** Normalizado; hilos distintos: WEB_ISA (Isa), WEB_AGENTE (humano), IA360_DOC (doc), WEB legacy, TELEGRAM… */
+    const canalNorm = String(canal || 'WEB').trim().slice(0, 30) || 'WEB';
 
     const contacto = await db('contactos')
       .where({
@@ -285,11 +292,12 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Evitar duplicados: si el contacto ya tiene una conversación activa, devolverla con historial
+    // Evitar duplicados: una activa por (empresa, contacto, canal)
     const existente = await db('conversaciones')
       .where({
         empresa_id: Number(empresa_id),
         contacto_id: Number(contacto_id),
+        canal: canalNorm,
       })
       .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
       .orderBy('creada_en', 'desc')
@@ -309,7 +317,7 @@ router.post('/', async (req, res) => {
         .insert({
           empresa_id: Number(empresa_id),
           contacto_id: Number(contacto_id),
-          canal: canal || 'WEB',
+          canal: canalNorm,
           tema: tema || 'SOPORTE',
           estado: 'EN_COLA',
           prioridad: 'MEDIA',
@@ -323,6 +331,7 @@ router.post('/', async (req, res) => {
           .where({
             empresa_id: Number(empresa_id),
             contacto_id: Number(contacto_id),
+            canal: canalNorm,
           })
           .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
           .orderBy('creada_en', 'desc')

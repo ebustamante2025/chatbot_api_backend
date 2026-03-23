@@ -1,6 +1,7 @@
 import express from 'express';
 import { db } from '../database/connection.js';
 import { getIO } from '../socket.js';
+import { sendTelegramMessage } from '../services/telegramService.js';
 import type { JwtPayload } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -33,7 +34,7 @@ router.get('/conversacion/:conversacion_id', async (req, res) => {
   }
 });
 
-// Crear mensaje (CONTACTO, AGENTE, BOT o SISTEMA)
+// Crear mensaje (CONTACTO, AGENTE, BOT, IA360 o SISTEMA) — IA360 = asistente automático (Isa / documentación)
 router.post('/', async (req, res) => {
   try {
     const {
@@ -52,7 +53,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const validEmisores = ['CONTACTO', 'AGENTE', 'BOT', 'SISTEMA'];
+    const validEmisores = ['CONTACTO', 'AGENTE', 'BOT', 'IA360', 'SISTEMA'];
     if (!validEmisores.includes(tipo_emisor)) {
       return res.status(400).json({
         error: 'tipo_emisor inválido',
@@ -214,8 +215,8 @@ router.post('/', async (req, res) => {
         });
       }
 
-      // Emitir evento global para dashboards (bot, admin) cuando llegan mensajes BOT o CONTACTO
-      if (tipo_emisor === 'BOT' || tipo_emisor === 'CONTACTO') {
+      // Emitir evento global para dashboards (bot, admin) cuando llegan mensajes del asistente o CONTACTO
+      if (tipo_emisor === 'BOT' || tipo_emisor === 'IA360' || tipo_emisor === 'CONTACTO') {
         socketIO.emit('bot_conversation_activity', {
           id_conversacion: conversacionIdNum,
           tipo_emisor,
@@ -229,6 +230,23 @@ router.post('/', async (req, res) => {
       });
 
       console.log(`[WebSocket] Mensaje emitido a conversación ${conversacion_id}`);
+    }
+
+    // Si la conversación es por Telegram y el mensaje es del agente, enviar también a Telegram
+    if (tipo_emisor === 'AGENTE' && String(conversacion.canal || '').toUpperCase() === 'TELEGRAM') {
+      const link = await db('telegram_contactos')
+        .where({ empresa_id: conversacion.empresa_id, contacto_id: conversacion.contacto_id })
+        .first();
+      if (link?.chat_id) {
+        sendTelegramMessage(String(link.chat_id), contenido.trim())
+          .then((r) => {
+            if (r.ok) console.log('[Telegram] Mensaje enviado al chat_id:', link!.chat_id);
+            else console.error('[Telegram] sendMessage no ok:', r.description);
+          })
+          .catch((err) => console.error('[Telegram] Error enviando mensaje al contacto:', err));
+      } else {
+        console.warn('[Telegram] No hay chat_id en telegram_contactos para empresa_id=%s contacto_id=%s — la respuesta no se envió a Telegram.', conversacion.empresa_id, conversacion.contacto_id);
+      }
     }
 
     res.status(201).json({

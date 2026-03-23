@@ -142,7 +142,7 @@ router.get('/conversaciones-bot', async (req, res) => {
         'empresas.nit as empresa_nit',
         db.raw("EXTRACT(EPOCH FROM (now() - conversaciones.creada_en))::int AS segundos_desde_inicio"),
         db.raw("EXTRACT(EPOCH FROM (now() - conversaciones.ultima_actividad_en))::int AS segundos_sin_actividad"),
-        db.raw("(SELECT COUNT(*) FROM mensajes WHERE mensajes.conversacion_id = conversaciones.id_conversacion AND mensajes.tipo_emisor = 'BOT')::int AS total_mensajes_bot"),
+        db.raw("(SELECT COUNT(*) FROM mensajes WHERE mensajes.conversacion_id = conversaciones.id_conversacion AND mensajes.tipo_emisor IN ('BOT', 'IA360'))::int AS total_mensajes_bot"),
         db.raw("(SELECT COUNT(*) FROM mensajes WHERE mensajes.conversacion_id = conversaciones.id_conversacion AND mensajes.tipo_emisor = 'CONTACTO')::int AS total_mensajes_contacto"),
         db.raw("(SELECT COUNT(*) FROM mensajes WHERE mensajes.conversacion_id = conversaciones.id_conversacion)::int AS total_mensajes")
       )
@@ -151,7 +151,7 @@ router.get('/conversaciones-bot', async (req, res) => {
       .whereExists(
         db('mensajes')
           .whereRaw('mensajes.conversacion_id = conversaciones.id_conversacion')
-          .where('mensajes.tipo_emisor', 'BOT')
+          .whereIn('mensajes.tipo_emisor', ['BOT', 'IA360'])
       )
       .orderBy('conversaciones.ultima_actividad_en', 'desc');
 

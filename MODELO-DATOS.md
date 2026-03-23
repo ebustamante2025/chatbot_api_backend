@@ -70,15 +70,20 @@ Clientes o prospectos que interactúan con el widget.
 ---
 
 ### 4. **conversaciones**
-Conversaciones entre contactos y agentes.
+Conversaciones entre contactos y agentes. **Todo el historial** vive aquí y en **`mensajes`**; no hace falta otra tabla por canal (la auxiliar `ia360_doc_mensajes` fue descartada; migración 012 la elimina si existía).
 
 ```sql
 - id_conversacion (PK)
 - empresa_id (FK → empresas)
 - contacto_id (FK → contactos)
-- canal (WEB, WHATSAPP, EMAIL, etc.)
+- canal (string 30): identifica el **hilo/origen** para informes y reglas. Valores usados en el proyecto:
+  - **`WEB`** — legado o genérico.
+  - **`WEB_ISA`** — chat con **Isa** (widget).
+  - **`WEB_AGENTE`** — cola **chatear con agente humano** (widget).
+  - **`IA360_DOC`** — asistente de **documentación** (Streamlit / “Prueba”).
+  - **`TELEGRAM`** — bot Telegram.
 - tema (SOPORTE, VENTAS, COBRANZA, etc.)
-- estado (EN_COLA, EN_BOT, ASIGNADA, CERRADA, etc.)
+- **estado** (obligatorio, `string(20)`): ciclo de vida del hilo (ver lista abajo).
 - prioridad (BAJA, MEDIA, ALTA, URGENTE)
 - asignada_a_usuario_id (FK → usuarios_soporte)
 - asignada_en, bloqueada_hasta
@@ -86,13 +91,15 @@ Conversaciones entre contactos y agentes.
 - creada_en, cerrada_en
 ```
 
+**Índice único (parcial)**: una conversación activa (`EN_COLA` / `ASIGNADA` / `ACTIVA`) por **`(empresa_id, contacto_id, canal)`**, para que Isa, agente e IA360 doc no compartan el mismo hilo.
+
 **Índice**: `(empresa_id, estado, creada_en)` - Para consultar bandejas eficientemente.
 
-**Estados**:
-- `EN_COLA`: Esperando asignación
-- `EN_BOT`: Atendida por bot
-- `ASIGNADA`: Asignada a un agente
-- `CERRADA`: Finalizada
+**Estados** (los únicos válidos en BD; `CHECK` en migraciones):
+- `EN_COLA`: En cola (p. ej. widget agente, Telegram recién creado).
+- `ASIGNADA`: Asignada a un asesor.
+- `ACTIVA`: Hilo activo (p. ej. sesión IA360 documentación, o conversación en curso según reglas de negocio).
+- `CERRADA`: Finalizada.
 
 **Uso**:
 - **CRM**: Bandejas (En cola, Asignadas a mí, Cerradas)
@@ -107,7 +114,7 @@ Mensajes dentro de las conversaciones.
 - id_mensaje (PK)
 - empresa_id (FK → empresas)
 - conversacion_id (FK → conversaciones)
-- tipo_emisor (CONTACTO/AGENTE/BOT/SISTEMA)
+- tipo_emisor (ver tabla abajo)
 - usuario_id (FK → usuarios_soporte, si es AGENTE)
 - contacto_id (FK → contactos, si es CONTACTO)
 - contenido
@@ -115,6 +122,23 @@ Mensajes dentro de las conversaciones.
 ```
 
 **Índice**: `(conversacion_id, creado_en)` - Para ordenar mensajes por fecha.
+
+#### Tipos de emisor (`tipo_emisor`)
+
+Valores permitidos por la API (`POST /api/mensajes` y lógica interna). Columna `string(20)` en BD; no es un ENUM de PostgreSQL, pero el backend valida la lista.
+
+| Valor | Significado |
+|--------|-------------|
+| **CONTACTO** | Mensaje del **cliente** (widget web, Telegram, o pregunta al asistente de documentación IA360). Requiere `contacto_id` coherente con la conversación. |
+| **AGENTE** | Mensaje de un **asesor humano** del CRM. Suele llevar `usuario_id`. |
+| **BOT** | Respuesta automática del **bot** del chat (p. ej. mensaje de bienvenida, flujos automáticos que no sean Isa/doc). |
+| **IA360** | Respuestas del agente **Isa** (widget) y del **asistente de documentación** (Streamlit, conversación con canal **`IA360_DOC`**). Todo en la tabla **`mensajes`**. |
+| **SISTEMA** | Mensajes **automáticos del sistema** dentro del hilo: transferencias entre agentes, cierre de conversación, texto de despedida, notas de cierre. **No** es un canal de “anuncios” masivos a todos los clientes; son eventos ligados a acciones sobre esa conversación. |
+
+**Notas**:
+
+- En **IA360_DOC** (Streamlit): solo **`conversaciones`** + **`mensajes`**: usuario **CONTACTO**, asistente **IA360** (sin tabla auxiliar).
+- Referencia de código: `chatbot_api_backend/src/routes/mensajes.ts` (`validEmisores`).
 
 **Uso**:
 - **CRM**: Ver historial y enviar mensajes
