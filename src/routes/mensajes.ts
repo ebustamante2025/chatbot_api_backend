@@ -234,8 +234,11 @@ router.post('/', async (req, res) => {
 
     // Si la conversación es por Telegram y el mensaje es del agente, enviar también a Telegram
     if (tipo_emisor === 'AGENTE' && String(conversacion.canal || '').toUpperCase() === 'TELEGRAM') {
+      /** Mismo contacto puede tener varios chat_id: responder al que escribió por último (ultima_actividad_en). */
       const link = await db('telegram_contactos')
         .where({ empresa_id: conversacion.empresa_id, contacto_id: conversacion.contacto_id })
+        .orderBy('ultima_actividad_en', 'desc')
+        .orderBy('id', 'desc')
         .first();
       if (link?.chat_id) {
         sendTelegramMessage(String(link.chat_id), contenido.trim())

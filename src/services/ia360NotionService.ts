@@ -3,8 +3,17 @@
  */
 import { Client, APIResponseError } from '@notionhq/client';
 
-const MAX_TOOL_RESULT_CHARS = 12_000;
 const MAX_RETRIES = 3;
+
+/** Menos caracteres por herramienta = menos tokens y vueltas más rápidas (env: IA360_MAX_TOOL_RESULT_CHARS). */
+function getMaxToolResultChars(): number {
+  const raw = process.env.IA360_MAX_TOOL_RESULT_CHARS?.trim();
+  if (raw) {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 2000 && n <= 50_000) return n;
+  }
+  return 9000;
+}
 
 function getNotion(): Client | null {
   const key = process.env.NOTION_API_KEY?.trim();
@@ -12,9 +21,10 @@ function getNotion(): Client | null {
   return new Client({ auth: key });
 }
 
-function truncateText(text: string, maxChars: number = MAX_TOOL_RESULT_CHARS): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars - 50)}\n\n... [contenido truncado por longitud]`;
+function truncateText(text: string, maxChars?: number): string {
+  const cap = maxChars ?? getMaxToolResultChars();
+  if (text.length <= cap) return text;
+  return `${text.slice(0, cap - 50)}\n\n... [contenido truncado por longitud]`;
 }
 
 function richTextToString(rich: Array<{ plain_text?: string }> | undefined): string {

@@ -2,12 +2,19 @@
  * Integración Telegram: webhook para recibir mensajes, registro por NIT/cédula,
  * creación de conversaciones con canal TELEGRAM y guardado en mensajes.
  * Los asesores responden desde el CRM; el envío a Telegram se hace en mensajes.ts.
+ *
+ * Varios chat_id pueden compartir el mismo contacto (mismo NIT/cédula): varias filas en telegram_contactos.
+ * Un segundo dispositivo no puede completar el registro mientras exista otro chat vinculado al mismo contacto
+ * y una conversación de soporte activa (EN_COLA/ASIGNADA/ACTIVA, excl. IA360_DOC); al quedar CERRADA, sí.
+ * Comandos /registrar o /cambiar: borran el vínculo de ESTE chat y reinician el flujo NIT → cédula
+ * (misma cuenta puede asociarse a otra empresa/persona).
  */
 import express from 'express';
 import { db } from '../database/connection.js';
 import { getIO } from '../socket.js';
 import { validarLicencia } from '../services/licenciaService.js';
 import { sendTelegramMessage, isTelegramConfigured, getTelegramBotMe } from '../services/telegramService.js';
+import { findConversacionActivaSoporte } from '../services/conversacionActivaUnica.js';
 
 const router = express.Router();
 
@@ -66,6 +73,14 @@ function extractMessage(update: Record<string, any>): { chatId: string; text: st
   };
 }
 
+/** /registrar, /cambiar o /reiniciar (admite sufijo @NombreBot). */
+function isRegistrarCommand(raw: string): boolean {
+  const first = raw.trim().split(/\s+/)[0]?.toLowerCase() || '';
+  if (!first.startsWith('/')) return false;
+  const cmd = first.split('@')[0];
+  return cmd === '/registrar' || cmd === '/cambiar' || cmd === '/reiniciar';
+}
+
 async function ensureEmpresaByNit(nit: string): Promise<{ id_empresa: number; nombre_empresa: string } | { error: string }> {
   const validacion = await validarLicencia(nit);
   if (!validacion.valida) {
@@ -106,12 +121,7 @@ async function ensureContacto(empresaId: number, documento: string, nombre: stri
 }
 
 async function findOrCreateConversacionTelegram(empresaId: number, contactoId: number): Promise<{ id_conversacion: number; created: boolean }> {
-  const existente = await db('conversaciones')
-    .where({ empresa_id: empresaId, contacto_id: contactoId })
-    .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
-    .where('canal', 'TELEGRAM')
-    .orderBy('creada_en', 'desc')
-    .first();
+  const existente = await findConversacionActivaSoporte(empresaId, contactoId);
 
   if (existente) {
     return { id_conversacion: existente.id_conversacion, created: false };
@@ -211,6 +221,27 @@ router.post('/webhook', async (req, res) => {
   const chatId = msg.chatId;
   const text = msg.text;
 
+  if (text && isRegistrarCommand(text)) {
+    pendingRegistration.delete(chatId);
+    const removed = await db('telegram_contactos').where('chat_id', chatId).del();
+    const nombreTelegram = [from?.first_name, from?.last_name].filter(Boolean).join(' ').trim();
+    const telegramUsername = from?.username ? String(from.username) : '';
+    const telegramUserId = from?.id != null ? String(from.id) : '';
+    pendingRegistration.set(chatId, {
+      step: 'nit',
+      nombre_telegram: nombreTelegram || undefined,
+      telegram_username: telegramUsername || undefined,
+      telegram_user_id: telegramUserId || undefined,
+    });
+    await sendTelegramMessage(
+      chatId,
+      removed
+        ? 'Registro de este chat reiniciado. Ingrese el NIT de su empresa (solo números).'
+        : 'Ingrese el NIT de su empresa (solo números).'
+    );
+    return;
+  }
+
   const pending = pendingRegistration.get(chatId);
   if (pending) {
     if (pending.step === 'nit') {
@@ -255,6 +286,21 @@ router.post('/webhook', async (req, res) => {
       if ('error' in con) {
         await sendTelegramMessage(chatId, `No se pudo registrar: ${con.error}`);
         return;
+      }
+      const otroChat = await db('telegram_contactos')
+        .where({ empresa_id: empresaId, contacto_id: con.id_contacto })
+        .whereNot('chat_id', chatId)
+        .first();
+      if (otroChat) {
+        const convActiva = await findConversacionActivaSoporte(empresaId, con.id_contacto);
+        if (convActiva) {
+          await sendTelegramMessage(
+            chatId,
+            'Ya hay otro número de Telegram vinculado a este NIT y cédula con la conversación de soporte abierta. Cuando el asesor cierre el caso en el CRM, podrá completar el registro desde este dispositivo. Si necesita cambiar de número, use /registrar en el Telegram que ya está vinculado.'
+          );
+          pendingRegistration.delete(chatId);
+          return;
+        }
       }
       await db('telegram_contactos').insert({
         chat_id: chatId,

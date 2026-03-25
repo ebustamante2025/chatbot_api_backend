@@ -1,6 +1,7 @@
 import express from 'express';
 import { db } from '../database/connection.js';
 import { getIO } from '../socket.js';
+import { findConversacionActivaSoporte } from '../services/conversacionActivaUnica.js';
 
 const router = express.Router();
 
@@ -262,7 +263,7 @@ async function obtenerMensajesConversacion(conversacionId: number) {
 }
 
 // Crear conversación (widget: Isa WEB_ISA, agente WEB_AGENTE, etc.)
-// Una conversación activa por (empresa, contacto, canal); si ya existe para ese canal, se devuelve con historial.
+// Una conversación activa de soporte humano por (empresa, contacto); IA360_DOC va en otro hilo (ver migración 016).
 // Se incluyen mensajes para que el widget muestre el historial mientras la conversación esté activa.
 router.post('/', async (req, res) => {
   try {
@@ -275,7 +276,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    /** Normalizado; hilos distintos: WEB_ISA (Isa), WEB_AGENTE (humano), IA360_DOC (doc), WEB legacy, TELEGRAM… */
+    /** Canal con el que se abrió el hilo; no se sobrescribe si la conversación ya existía (otro origen). */
     const canalNorm = String(canal || 'WEB').trim().slice(0, 30) || 'WEB';
 
     const contacto = await db('contactos')
@@ -292,16 +293,7 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Evitar duplicados: una activa por (empresa, contacto, canal)
-    const existente = await db('conversaciones')
-      .where({
-        empresa_id: Number(empresa_id),
-        contacto_id: Number(contacto_id),
-        canal: canalNorm,
-      })
-      .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
-      .orderBy('creada_en', 'desc')
-      .first();
+    const existente = await findConversacionActivaSoporte(Number(empresa_id), Number(contacto_id));
 
     if (existente) {
       const mensajes = await obtenerMensajesConversacion(existente.id_conversacion);
@@ -327,15 +319,7 @@ router.post('/', async (req, res) => {
       // Condición de carrera: otro request insertó primero (índice único)
       const code = (insertError as { code?: string })?.code;
       if (code === '23505') {
-        const existente2 = await db('conversaciones')
-          .where({
-            empresa_id: Number(empresa_id),
-            contacto_id: Number(contacto_id),
-            canal: canalNorm,
-          })
-          .whereIn('estado', ['EN_COLA', 'ASIGNADA', 'ACTIVA'])
-          .orderBy('creada_en', 'desc')
-          .first();
+        const existente2 = await findConversacionActivaSoporte(Number(empresa_id), Number(contacto_id));
         if (existente2) {
           const mensajes2 = await obtenerMensajesConversacion(existente2.id_conversacion);
           return res.status(200).json({

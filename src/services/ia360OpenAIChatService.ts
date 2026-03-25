@@ -8,8 +8,18 @@ import type {
 } from 'openai/resources/chat/completions';
 import { executeIa360NotionTool } from './ia360NotionService.js';
 
-const MAX_TOOL_ROUNDS = 8;
-const MAX_HISTORY_MESSAGES = 40;
+function clampInt(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/** Rondas modelo↔Notion (defecto 5). Menor = más rápido, menos exhaustivo. */
+function readEnvInt(name: string, defaultVal: number, lo: number, hi: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return defaultVal;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) return defaultVal;
+  return clampInt(n, lo, hi);
+}
 
 const SYSTEM_PROMPT = `Eres un asistente inteligente de documentacion interna de la empresa. \
 Tienes acceso a toda la base de conocimiento y documentacion de la organizacion.
@@ -36,14 +46,10 @@ informacion real antes de responder.
 ![texto](url)), SIEMPRE incluyelas en tu respuesta usando exactamente la misma \
 sintaxis Markdown ![descripcion](url). Nunca omitas imagenes ni digas que no puedes \
 mostrarlas. Las imagenes son parte esencial de la documentacion.
-9. AGOTAR HERRAMIENTAS ANTES DE RENDIRTE: antes de decir que no puedes obtener una seccion \
-o un procedimiento (ej. factura en HGI360 POS, "Generacion Documentos"), DEBES llamar las \
-herramientas varias veces en este mismo turno: search_notion con consultas distintas \
-(sinonimos, nombre del producto, modulo, accion: factura, POS, documento, electronico, etc.), \
-en caso util list_databases para ubicar bases, y con los IDs obtenidos usar get_page_content \
-para leer el documento completo. Si hay varias paginas relevantes, lee la mas acorde. \
-Solo si tras eso los resultados siguen vacios o el error viene de la herramienta, di que no \
-aparece en la documentacion accesible y sugiere reformular la pregunta.
+9. BUSQUEDA RAPIDA: primero search_notion con la pregunta del usuario; si aparece un documento \
+claro, get_page_content. Si no hay resultados utiles, como maximo UNA busqueda alternativa con \
+sinonimos o modulo distinto, luego lee la mejor pagina. Usa list_databases solo si no localizas \
+el area. Evita mas de 2-3 search_notion por respuesta; no repitas consultas casi identicas.
 10. No sugieras "contactar soporte tecnico" o externos como sustituto de haber buscado y leido \
 la documentacion interna. El soporte humano no es un paso automatico: primero la base de conocimiento.
 11. Si el usuario pide algo que objetivamente no esta en las herramientas, explicalo sin revelar \
@@ -52,7 +58,9 @@ detalles tecnicos internos.
 en el documento leido, sin rodeos. Si el documento lista secciones, citelas.
 13. IMAGENES OBLIGATORIAS: copia en tu respuesta TODAS las lineas Markdown ![descripcion](url) que \
 aparezcan en get_page_content, sin resumir ni sustituir por texto. El usuario debe ver las mismas \
-ilustraciones que en la documentacion.`;
+ilustraciones que en la documentacion.
+14. No combines regla 9 con bucles largos de herramientas: prioriza una lectura buena frente a \
+muchas busquedas superficiales.`;
 
 const TOOLS: ChatCompletionTool[] = [
   {
@@ -145,11 +153,14 @@ function getClient(): OpenAI | null {
   return new OpenAI({ apiKey: key });
 }
 
-function trimMessages(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
-  if (messages.length <= MAX_HISTORY_MESSAGES + 1) return messages;
+function trimMessages(
+  messages: ChatCompletionMessageParam[],
+  maxHistory: number
+): ChatCompletionMessageParam[] {
+  if (messages.length <= maxHistory + 1) return messages;
   const sys = messages[0];
   const rest = messages.slice(1);
-  const tail = rest.slice(-MAX_HISTORY_MESSAGES);
+  const tail = rest.slice(-maxHistory);
   return sys ? [sys, ...tail] : tail;
 }
 
@@ -167,24 +178,30 @@ export async function runIa360Chat(params: {
   }
 
   const model = params.model?.trim() || process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini';
+  const maxHistory = readEnvInt('IA360_MAX_HISTORY_MESSAGES', 24, 4, 80);
+  const maxRounds = readEnvInt('IA360_MAX_TOOL_ROUNDS', 5, 1, 12);
 
   const prior: ChatCompletionMessageParam[] = params.history.map((h) => ({
     role: h.role,
     content: h.content,
   }));
 
-  let messages: ChatCompletionMessageParam[] = trimMessages([
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...prior,
-    { role: 'user', content: params.userMessage },
-  ]);
+  let messages: ChatCompletionMessageParam[] = trimMessages(
+    [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...prior,
+      { role: 'user', content: params.userMessage },
+    ],
+    maxHistory
+  );
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     const response = await client.chat.completions.create({
       model,
       messages,
       tools: TOOLS,
       tool_choice: 'auto',
+      temperature: 0.35,
     });
 
     const message = response.choices[0]?.message;
@@ -199,14 +216,20 @@ export async function runIa360Chat(params: {
 
     messages.push(message as ChatCompletionMessageParam);
 
-    for (const tc of message.tool_calls) {
-      const name = tc.function.name;
-      const args = tc.function.arguments ?? '{}';
-      const result = await executeIa360NotionTool(name, args);
+    const toolCalls = message.tool_calls;
+    const results = await Promise.all(
+      toolCalls.map(async (tc) => {
+        const name = tc.function.name;
+        const args = tc.function.arguments ?? '{}';
+        const content = await executeIa360NotionTool(name, args);
+        return { id: tc.id, content };
+      })
+    );
+    for (const r of results) {
       messages.push({
         role: 'tool',
-        tool_call_id: tc.id,
-        content: result,
+        tool_call_id: r.id,
+        content: r.content,
       });
     }
   }
@@ -216,6 +239,7 @@ export async function runIa360Chat(params: {
   const final = await client2.chat.completions.create({
     model,
     messages,
+    temperature: 0.35,
   });
   const reply = final.choices[0]?.message?.content ?? '';
   return { reply };

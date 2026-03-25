@@ -6,11 +6,9 @@
 
  *
 
- * Solo tablas estándar **`conversaciones`** + **`mensajes`** (canal **IA360_DOC**):
+ * Hilo **IA360_DOC** separado del soporte humano (web/Telegram): su propia conversación activa e historial.
 
- * - preguntas del usuario → `tipo_emisor` = **CONTACTO**
-
- * - respuestas del asistente → `tipo_emisor` = **IA360**
+ * Mensajes: `conversaciones` + **`mensajes`** — CONTACTO / **IA360**
 
  */
 
@@ -32,6 +30,8 @@ import { isNotionConfigured } from '../services/ia360NotionService.js';
 
 import { stripMarkdownImagesForCrm } from '../utils/ia360CrmText.js';
 
+import { findConversacionActivaIa360 } from '../services/conversacionActivaUnica.js';
+
 
 
 const router = express.Router();
@@ -40,7 +40,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'crm-chatbot-secret-change-in-produ
 
 
 
-/** Canal dedicado: no mezcla con WEB/TELEGRAM ni sustituye conversaciones BOT */
+/** Valor de `canal` para el hilo exclusivo de documentación (no mezclar con soporte). */
 
 const CANAL_IA360 = 'IA360_DOC';
 
@@ -104,35 +104,19 @@ function verifyFaqToken(token: string): FaqTokenPayload | null {
 
 /**
 
- * Una conversación por (empresa, contacto) para el hilo IA360 en la tabla estándar `mensajes`.
+ * Solo conversaciones con canal IA360_DOC; el soporte humano usa otro id_conversacion.
 
  */
 
 async function findOrCreateConversacionIa360(empresaId: number, contactoId: number): Promise<number> {
 
-  const existente = await db('conversaciones')
-
-    .where({
-
-      empresa_id: empresaId,
-
-      contacto_id: contactoId,
-
-      canal: CANAL_IA360,
-
-    })
-
-    .first();
-
-
+  const existente = await findConversacionActivaIa360(empresaId, contactoId);
 
   if (existente?.id_conversacion != null) {
 
     return Number(existente.id_conversacion);
 
   }
-
-
 
   const inserted = await db('conversaciones')
 
@@ -153,8 +137,6 @@ async function findOrCreateConversacionIa360(empresaId: number, contactoId: numb
     })
 
     .returning('id_conversacion');
-
-
 
   const row = Array.isArray(inserted) ? inserted[0] : inserted;
 
@@ -640,21 +622,7 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
 
 
-    const conv = await db('conversaciones')
-
-      .where({
-
-        empresa_id: empresaId,
-
-        contacto_id: contactoId,
-
-        canal: CANAL_IA360,
-
-      })
-
-      .first();
-
-
+    const conv = await findConversacionActivaIa360(empresaId, contactoId);
 
     if (!conv?.id_conversacion) {
 
@@ -677,8 +645,6 @@ router.get('/ia360-doc/historial', async (req, res) => {
       });
 
     }
-
-
 
     const convId = Number(conv.id_conversacion);
 
@@ -704,7 +670,7 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
       conversacion_id: convId,
 
-      canal: CANAL_IA360,
+      canal: String(conv.canal || CANAL_IA360),
 
       total: filas.length,
 
@@ -962,47 +928,25 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    const asstSaved = await guardarEnMensajesCrm(
-
-      empresaId,
-
-      contactoId,
-
-      convId,
-
-      'asistente',
-
-      reply,
-
-    );
-
-    if (!asstSaved) {
-
-      return res.json({
-
-        success: true,
-
-        reply,
-
-        warning: 'Respuesta generada pero no se pudo guardar en CRM',
-
-        conversacion_id: convId,
-
-      });
-
-    }
-
-
-
-    return res.json({
-
+    /** Respuesta al cliente de inmediato; persistencia del asistente y sockets en segundo plano (menos espera HTTP). */
+    res.json({
       success: true,
-
       reply,
-
       conversacion_id: convId,
-
     });
+
+    void (async () => {
+      try {
+        const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', reply);
+        if (!asstSaved) {
+          console.warn('[ia360-doc/chat] Respuesta enviada pero no se guardó en CRM', { convId });
+        }
+      } catch (e) {
+        console.error('[ia360-doc/chat] Error guardando respuesta asistente (async):', e);
+      }
+    })();
+
+    return;
 
   } catch (error) {
 
