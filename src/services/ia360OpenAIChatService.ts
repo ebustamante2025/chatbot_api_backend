@@ -12,7 +12,7 @@ function clampInt(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-/** Rondas modelo↔Notion (defecto 8). Menor = más rápido, menos exhaustivo (env IA360_MAX_TOOL_ROUNDS). */
+/** Rondas modelo↔Notion (defecto 5). Menor = más rápido, menos exhaustivo (env IA360_MAX_TOOL_ROUNDS). */
 function readEnvInt(name: string, defaultVal: number, lo: number, hi: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return defaultVal;
@@ -183,8 +183,8 @@ export async function runIa360Chat(params: {
   }
 
   const model = params.model?.trim() || process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini';
-  const maxHistory = readEnvInt('IA360_MAX_HISTORY_MESSAGES', 40, 4, 80);
-  const maxRounds = readEnvInt('IA360_MAX_TOOL_ROUNDS', 8, 1, 12);
+  const maxHistory = readEnvInt('IA360_MAX_HISTORY_MESSAGES', 24, 4, 80);
+  const maxRounds = readEnvInt('IA360_MAX_TOOL_ROUNDS', 5, 1, 12);
 
   const prior: ChatCompletionMessageParam[] = params.history.map((h) => ({
     role: h.role,
