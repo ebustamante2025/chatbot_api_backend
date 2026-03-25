@@ -12,7 +12,7 @@ function clampInt(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-/** Rondas modelo↔Notion (defecto 5). Menor = más rápido, menos exhaustivo. */
+/** Rondas modelo↔Notion (defecto 8). Menor = más rápido, menos exhaustivo (env IA360_MAX_TOOL_ROUNDS). */
 function readEnvInt(name: string, defaultVal: number, lo: number, hi: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return defaultVal;
@@ -46,10 +46,14 @@ informacion real antes de responder.
 ![texto](url)), SIEMPRE incluyelas en tu respuesta usando exactamente la misma \
 sintaxis Markdown ![descripcion](url). Nunca omitas imagenes ni digas que no puedes \
 mostrarlas. Las imagenes son parte esencial de la documentacion.
-9. BUSQUEDA RAPIDA: primero search_notion con la pregunta del usuario; si aparece un documento \
-claro, get_page_content. Si no hay resultados utiles, como maximo UNA busqueda alternativa con \
-sinonimos o modulo distinto, luego lee la mejor pagina. Usa list_databases solo si no localizas \
-el area. Evita mas de 2-3 search_notion por respuesta; no repitas consultas casi identicas.
+9. AGOTAR HERRAMIENTAS ANTES DE RENDIRTE: antes de decir que no puedes obtener una seccion \
+o un procedimiento (ej. factura en HGI360 POS, "Generacion Documentos"), DEBES llamar las \
+herramientas varias veces en este mismo turno: search_notion con consultas distintas \
+(sinonimos, nombre del producto, modulo, accion: factura, POS, documento, electronico, etc.), \
+en caso util list_databases para ubicar bases, y con los IDs obtenidos usar get_page_content \
+para leer el documento completo. Si hay varias paginas relevantes, lee la mas acorde. \
+Solo si tras eso los resultados siguen vacios o el error viene de la herramienta, di que no \
+aparece en la documentacion accesible y sugiere reformular la pregunta.
 10. No sugieras "contactar soporte tecnico" o externos como sustituto de haber buscado y leido \
 la documentacion interna. El soporte humano no es un paso automatico: primero la base de conocimiento.
 11. Si el usuario pide algo que objetivamente no esta en las herramientas, explicalo sin revelar \
@@ -59,8 +63,9 @@ en el documento leido, sin rodeos. Si el documento lista secciones, citelas.
 13. IMAGENES OBLIGATORIAS: copia en tu respuesta TODAS las lineas Markdown ![descripcion](url) que \
 aparezcan en get_page_content, sin resumir ni sustituir por texto. El usuario debe ver las mismas \
 ilustraciones que en la documentacion.
-14. No combines regla 9 con bucles largos de herramientas: prioriza una lectura buena frente a \
-muchas busquedas superficiales.`;
+14. EFICIENCIA: si search_notion ya devolvio un documento claramente relevante, usa get_page_content \
+antes de repetir busquedas con terminos casi iguales. Minimiza llamadas redundantes sin sacrificar \
+la regla 9 cuando realmente falte informacion.`;
 
 const TOOLS: ChatCompletionTool[] = [
   {
@@ -178,8 +183,8 @@ export async function runIa360Chat(params: {
   }
 
   const model = params.model?.trim() || process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini';
-  const maxHistory = readEnvInt('IA360_MAX_HISTORY_MESSAGES', 24, 4, 80);
-  const maxRounds = readEnvInt('IA360_MAX_TOOL_ROUNDS', 5, 1, 12);
+  const maxHistory = readEnvInt('IA360_MAX_HISTORY_MESSAGES', 40, 4, 80);
+  const maxRounds = readEnvInt('IA360_MAX_TOOL_ROUNDS', 8, 1, 12);
 
   const prior: ChatCompletionMessageParam[] = params.history.map((h) => ({
     role: h.role,
@@ -201,7 +206,6 @@ export async function runIa360Chat(params: {
       messages,
       tools: TOOLS,
       tool_choice: 'auto',
-      temperature: 0.35,
     });
 
     const message = response.choices[0]?.message;
@@ -239,7 +243,6 @@ export async function runIa360Chat(params: {
   const final = await client2.chat.completions.create({
     model,
     messages,
-    temperature: 0.35,
   });
   const reply = final.choices[0]?.message?.content ?? '';
   return { reply };

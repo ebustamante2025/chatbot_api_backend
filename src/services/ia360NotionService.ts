@@ -5,14 +5,14 @@ import { Client, APIResponseError } from '@notionhq/client';
 
 const MAX_RETRIES = 3;
 
-/** Menos caracteres por herramienta = menos tokens y vueltas más rápidas (env: IA360_MAX_TOOL_RESULT_CHARS). */
+/** Tope de caracteres por resultado de herramienta (env: IA360_MAX_TOOL_RESULT_CHARS). */
 function getMaxToolResultChars(): number {
   const raw = process.env.IA360_MAX_TOOL_RESULT_CHARS?.trim();
   if (raw) {
     const n = Number.parseInt(raw, 10);
     if (Number.isFinite(n) && n >= 2000 && n <= 50_000) return n;
   }
-  return 9000;
+  return 12_000;
 }
 
 function getNotion(): Client | null {

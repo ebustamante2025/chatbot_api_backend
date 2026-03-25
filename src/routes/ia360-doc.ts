@@ -928,25 +928,22 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    /** Respuesta al cliente de inmediato; persistencia del asistente y sockets en segundo plano (menos espera HTTP). */
-    res.json({
+    const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', reply);
+
+    if (!asstSaved) {
+      return res.json({
+        success: true,
+        reply,
+        warning: 'Respuesta generada pero no se pudo guardar en CRM',
+        conversacion_id: convId,
+      });
+    }
+
+    return res.json({
       success: true,
       reply,
       conversacion_id: convId,
     });
-
-    void (async () => {
-      try {
-        const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', reply);
-        if (!asstSaved) {
-          console.warn('[ia360-doc/chat] Respuesta enviada pero no se guardó en CRM', { convId });
-        }
-      } catch (e) {
-        console.error('[ia360-doc/chat] Error guardando respuesta asistente (async):', e);
-      }
-    })();
-
-    return;
 
   } catch (error) {
 
