@@ -2,7 +2,9 @@
 
  * IA360 — asistente de documentación (Streamlit): contexto empresa/contacto y persistencia de mensajes.
 
- * Autenticación: mismo JWT FAQ (purpose: faq) que emite POST /api/faq-acceso.
+ * Autenticación: por defecto mismo JWT FAQ (purpose: faq) que emite POST /api/faq-acceso.
+
+ * Opcional (solo entornos controlados): IA360_ALLOW_WITHOUT_TOKEN=true y empresaId + contactoId en body o query.
 
  *
 
@@ -97,6 +99,108 @@ function verifyFaqToken(token: string): FaqTokenPayload | null {
     return null;
 
   }
+
+}
+
+
+
+interface Ia360ResolvedSession {
+
+  empresaId: number;
+
+  contactoId: number;
+
+  servicioFromToken?: string;
+
+}
+
+
+
+function ia360AllowWithoutToken(): boolean {
+
+  return process.env.IA360_ALLOW_WITHOUT_TOKEN?.trim().toLowerCase() === 'true';
+
+}
+
+
+
+/**
+
+ * JWT FAQ si hay token; si IA360_ALLOW_WITHOUT_TOKEN=true, empresaId + contactoId en body o query.
+
+ */
+
+function resolveIa360Session(
+
+  req: express.Request,
+
+  body: Record<string, unknown>
+
+): { ok: true; session: Ia360ResolvedSession } | { ok: false; status: number; message: string } {
+
+  const token = getToken(req);
+
+  if (token) {
+
+    const decoded = verifyFaqToken(token);
+
+    if (!decoded) {
+
+      return { ok: false, status: 401, message: 'Token inválido o expirado' };
+
+    }
+
+    return {
+
+      ok: true,
+
+      session: {
+
+        empresaId: Number(decoded.empresaId),
+
+        contactoId: Number(decoded.contactoId),
+
+        servicioFromToken: decoded.servicio,
+
+      },
+
+    };
+
+  }
+
+  if (!ia360AllowWithoutToken()) {
+
+    return { ok: false, status: 401, message: 'Token requerido' };
+
+  }
+
+  const q = req.query as Record<string, unknown>;
+
+  const eRaw = body.empresaId ?? body.empresa_id ?? q.empresaId ?? q.empresa_id;
+
+  const cRaw = body.contactoId ?? body.contacto_id ?? q.contactoId ?? q.contacto_id;
+
+  const empresaId = eRaw != null && String(eRaw).trim() !== '' ? Number(eRaw) : NaN;
+
+  const contactoId = cRaw != null && String(cRaw).trim() !== '' ? Number(cRaw) : NaN;
+
+  if (!Number.isFinite(empresaId) || empresaId < 1 || !Number.isFinite(contactoId) || contactoId < 1) {
+
+    return {
+
+      ok: false,
+
+      status: 400,
+
+      message:
+
+        'Sin token: defina IA360_ALLOW_WITHOUT_TOKEN=true y envíe empresaId y contactoId (body o query).',
+
+    };
+
+  }
+
+  return { ok: true, session: { empresaId, contactoId } };
 
 }
 
@@ -319,41 +423,27 @@ router.get('/ia360-doc/contexto', async (req, res) => {
 
   try {
 
-    const token = getToken(req);
+    const resolved = resolveIa360Session(req, {});
 
-    if (!token) {
+    if (!resolved.ok) {
 
-      return res.status(401).json({
+      return res.status(resolved.status).json({
 
         success: false,
 
-        message: 'Token requerido',
+        message: resolved.message,
 
       });
 
     }
 
-    const decoded = verifyFaqToken(token);
+    const { empresaId, contactoId } = resolved.session;
 
-    if (!decoded) {
-
-      return res.status(401).json({
-
-        success: false,
-
-        message: 'Token inválido o expirado',
-
-      });
-
-    }
-
-
-
-    const empresa = await db('empresas').where({ id_empresa: Number(decoded.empresaId) }).first();
+    const empresa = await db('empresas').where({ id_empresa: empresaId }).first();
 
     const contacto = await db('contactos')
 
-      .where({ id_contacto: Number(decoded.contactoId), empresa_id: Number(decoded.empresaId) })
+      .where({ id_contacto: contactoId, empresa_id: empresaId })
 
       .first();
 
@@ -408,8 +498,6 @@ router.post('/ia360-doc/mensaje', async (req, res) => {
 
   try {
 
-    const token = getToken(req);
-
     const { rol, contenido, servicio } = req.body as {
 
       rol?: string;
@@ -418,21 +506,19 @@ router.post('/ia360-doc/mensaje', async (req, res) => {
 
       servicio?: string;
 
+      empresaId?: number;
+
+      contactoId?: number;
+
     };
 
 
 
-    if (!token) {
+    const resolved = resolveIa360Session(req, req.body as Record<string, unknown>);
 
-      return res.status(401).json({ success: false, message: 'Token requerido' });
+    if (!resolved.ok) {
 
-    }
-
-    const decoded = verifyFaqToken(token);
-
-    if (!decoded) {
-
-      return res.status(401).json({ success: false, message: 'Token inválido o expirado' });
+      return res.status(resolved.status).json({ success: false, message: resolved.message });
 
     }
 
@@ -464,9 +550,9 @@ router.post('/ia360-doc/mensaje', async (req, res) => {
 
 
 
-    const empresaId = Number(decoded.empresaId);
+    const empresaId = resolved.session.empresaId;
 
-    const contactoId = Number(decoded.contactoId);
+    const contactoId = resolved.session.contactoId;
 
 
 
@@ -482,7 +568,7 @@ router.post('/ia360-doc/mensaje', async (req, res) => {
 
         success: false,
 
-        message: 'Contacto no pertenece a la empresa del token',
+        message: 'Contacto no pertenece a la empresa indicada',
 
       });
 
@@ -566,27 +652,17 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
   try {
 
-    const token = getToken(req);
+    const resolved = resolveIa360Session(req, {});
 
-    if (!token) {
+    if (!resolved.ok) {
 
-      return res.status(401).json({ success: false, message: 'Token requerido' });
-
-    }
-
-    const decoded = verifyFaqToken(token);
-
-    if (!decoded) {
-
-      return res.status(401).json({ success: false, message: 'Token inválido o expirado' });
+      return res.status(resolved.status).json({ success: false, message: resolved.message });
 
     }
 
+    const empresaId = resolved.session.empresaId;
 
-
-    const empresaId = Number(decoded.empresaId);
-
-    const contactoId = Number(decoded.contactoId);
+    const contactoId = resolved.session.contactoId;
 
 
 
@@ -614,7 +690,7 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
         success: false,
 
-        message: 'Contacto no pertenece a la empresa del token',
+        message: 'Contacto no pertenece a la empresa indicada',
 
       });
 
@@ -722,9 +798,11 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
  * POST /api/ia360-doc/chat
 
- * Body: { token, message, history?: { role, content }[], servicio?: string }
+ * Body: { token?, message, history?, servicio?, empresaId?, contactoId? }
 
- * Valida JWT, guarda mensaje usuario + respuesta IA360 en CRM, devuelve { reply }.
+ * Con token JWT FAQ; o sin token si IA360_ALLOW_WITHOUT_TOKEN=true y empresaId + contactoId.
+
+ * Guarda mensaje usuario + respuesta IA360 en CRM, devuelve { reply }.
 
  * Misma lógica de negocio que chatbot_Agente (Streamlit), para usar desde chatbot_widget.
 
@@ -734,8 +812,6 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
   try {
 
-    const token = getToken(req);
-
     const body = req.body as {
 
       message?: string;
@@ -744,21 +820,19 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
       servicio?: string;
 
+      empresaId?: number;
+
+      contactoId?: number;
+
     };
 
 
 
-    if (!token) {
+    const resolved = resolveIa360Session(req, req.body as Record<string, unknown>);
 
-      return res.status(401).json({ success: false, message: 'Token requerido' });
+    if (!resolved.ok) {
 
-    }
-
-    const decoded = verifyFaqToken(token);
-
-    if (!decoded) {
-
-      return res.status(401).json({ success: false, message: 'Token inválido o expirado' });
+      return res.status(resolved.status).json({ success: false, message: resolved.message });
 
     }
 
@@ -792,7 +866,9 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
     const servicioBody = typeof body.servicio === 'string' ? body.servicio.trim() : '';
 
-    if (decoded.servicio && servicioBody && decoded.servicio !== servicioBody) {
+    const servicioToken = resolved.session.servicioFromToken;
+
+    if (servicioToken && servicioBody && servicioToken !== servicioBody) {
 
       return res.status(403).json({
 
@@ -830,9 +906,9 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    const empresaId = Number(decoded.empresaId);
+    const empresaId = resolved.session.empresaId;
 
-    const contactoId = Number(decoded.contactoId);
+    const contactoId = resolved.session.contactoId;
 
 
 
@@ -848,7 +924,7 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
         success: false,
 
-        message: 'Contacto no pertenece a la empresa del token',
+        message: 'Contacto no pertenece a la empresa indicada',
 
       });
 
@@ -954,6 +1030,144 @@ router.post('/ia360-doc/chat', async (req, res) => {
       success: false,
 
       message: 'Error al procesar el chat IA360',
+
+    });
+
+  }
+
+});
+
+
+
+/**
+
+ * POST /api/ia360-doc/chat-query
+
+ * Solo consulta OpenAI + Notion: sin JWT, sin empresa/contacto, sin guardar en BD (sin NIT/cédula).
+
+ * Activo únicamente si IA360_PUBLIC_QUERY_CHAT=true (pruebas de rendimiento / red cerrada).
+
+ */
+
+router.post('/ia360-doc/chat-query', async (req, res) => {
+
+  try {
+
+    if (process.env.IA360_PUBLIC_QUERY_CHAT?.trim().toLowerCase() !== 'true') {
+
+      return res.status(404).json({
+
+        success: false,
+
+        message: 'Ruta no disponible. Para pruebas: IA360_PUBLIC_QUERY_CHAT=true (solo entornos de confianza).',
+
+      });
+
+    }
+
+
+
+    if (!isOpenAIConfigured() || !isNotionConfigured()) {
+
+      return res.status(503).json({
+
+        success: false,
+
+        message:
+
+          'IA360 no está configurado: defina OPENAI_API_KEY y NOTION_API_KEY en el .env del backend.',
+
+      });
+
+    }
+
+
+
+    const body = req.body as {
+
+      message?: string;
+
+      history?: Ia360ChatHistoryItem[];
+
+    };
+
+
+
+    const msg = typeof body.message === 'string' ? body.message.trim() : '';
+
+    if (!msg) {
+
+      return res.status(400).json({ success: false, message: 'message es obligatorio' });
+
+    }
+
+
+
+    const historyRaw = Array.isArray(body.history) ? body.history : [];
+
+    const history: Ia360ChatHistoryItem[] = [];
+
+    for (const h of historyRaw) {
+
+      if (
+
+        h &&
+
+        (h.role === 'user' || h.role === 'assistant') &&
+
+        typeof h.content === 'string'
+
+      ) {
+
+        history.push({ role: h.role, content: h.content });
+
+      }
+
+    }
+
+
+
+    const chatResult = await runIa360Chat({ userMessage: msg, history });
+
+
+
+    if (chatResult.error) {
+
+      return res.status(502).json({ success: false, message: chatResult.error });
+
+    }
+
+
+
+    const reply = chatResult.reply ?? '';
+
+    if (!reply.trim()) {
+
+      return res.status(502).json({ success: false, message: 'El modelo no devolvió respuesta.' });
+
+    }
+
+
+
+    return res.json({
+
+      success: true,
+
+      reply,
+
+      note: 'Modo solo consulta: no se persistió en CRM ni se validó identidad.',
+
+    });
+
+  } catch (error) {
+
+    console.error('Error ia360-doc chat-query:', error);
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: 'Error al procesar la consulta IA360',
 
     });
 
