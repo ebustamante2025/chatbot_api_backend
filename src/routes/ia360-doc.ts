@@ -30,6 +30,7 @@ import {
 
 import { isNotionConfigured } from '../services/ia360NotionService.js';
 
+import { inlineNotionImagesInMarkdown } from '../services/ia360InlineImagesService.js';
 
 import { findConversacionActivaIa360 } from '../services/conversacionActivaUnica.js';
 
@@ -981,7 +982,7 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    const reply = chatResult.reply ?? '';
+    let reply = chatResult.reply ?? '';
 
     if (!reply.trim()) {
 
@@ -995,7 +996,7 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
     }
 
-
+    reply = await inlineNotionImagesInMarkdown(reply);
 
     const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', reply);
 
@@ -1132,7 +1133,7 @@ router.post('/ia360-doc/chat-query', async (req, res) => {
 
 
 
-    const reply = chatResult.reply ?? '';
+    let reply = chatResult.reply ?? '';
 
     if (!reply.trim()) {
 
@@ -1140,7 +1141,7 @@ router.post('/ia360-doc/chat-query', async (req, res) => {
 
     }
 
-
+    reply = await inlineNotionImagesInMarkdown(reply);
 
     return res.json({
 
