@@ -221,7 +221,7 @@ app.get('/', (req, res) => {
         chatQuery:
           'POST /api/ia360-doc/chat-query — Solo si IA360_PUBLIC_QUERY_CHAT=true: { message, history? }. Sin JWT ni CRM (pruebas de latencia)',
         proxyImage:
-          'GET /api/ia360-doc/proxy-image?url= — Reenvía imagen Notion/S3 para el widget (sin guardar en BD)',
+          'GET/POST /api/ia360-doc/proxy-image — Reenvía imagen Notion/S3 (GET ?url= o POST JSON {url}; POST evita 502 por URL larga en Nginx)',
       },
     },
   });

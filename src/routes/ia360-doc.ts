@@ -1172,17 +1172,15 @@ router.post('/ia360-doc/chat-query', async (req, res) => {
 
 /**
 
- * GET /api/ia360-doc/proxy-image?url=https%3A%2F%2F...
+ * GET ?url=… o POST JSON { url } — mismo comportamiento.
 
- * Sirve imágenes de Notion/S3 desde el servidor para evitar bloqueo por referrer/CORP en el widget.
+ * POST evita límites de longitud de la línea de petición en Nginx (URLs firmadas Notion/S3 muy largas → 502).
 
- * No guarda la imagen en BD; solo reenvía bytes. Lista blanca de hostnames.
+ * Sirve imágenes de Notion/S3 desde el servidor (referrer/CORP). Lista blanca de hostnames.
 
  */
 
-router.get('/ia360-doc/proxy-image', async (req, res) => {
-
-  const raw = req.query.url;
+function parseAllowedProxyImageUrl(raw: unknown): { ok: true; urlStr: string } | { ok: false; status: number; body: string } {
 
   let urlStr = typeof raw === 'string' ? raw.trim() : '';
 
@@ -1202,7 +1200,7 @@ router.get('/ia360-doc/proxy-image', async (req, res) => {
 
   if (!urlStr || !urlStr.startsWith('https://')) {
 
-    return res.status(400).type('text/plain').send('url https requerida');
+    return { ok: false, status: 400, body: 'url https requerida' };
 
   }
 
@@ -1214,13 +1212,13 @@ router.get('/ia360-doc/proxy-image', async (req, res) => {
 
   } catch {
 
-    return res.status(400).type('text/plain').send('url invalida');
+    return { ok: false, status: 400, body: 'url invalida' };
 
   }
 
   if (parsed.protocol !== 'https:') {
 
-    return res.status(400).type('text/plain').send('solo https');
+    return { ok: false, status: 400, body: 'solo https' };
 
   }
 
@@ -1236,96 +1234,169 @@ router.get('/ia360-doc/proxy-image', async (req, res) => {
 
     h === 'notionusercontent.com' ||
 
-    h.endsWith('notionusercontent.com');
+    h.endsWith('notionusercontent.com') ||
+
+    h.endsWith('.notion-static.com') ||
+
+    h === 'notion-static.com' ||
+
+    h.endsWith('.cloudfront.net');
 
   if (!allowed) {
 
-    return res.status(403).type('text/plain').send('host no permitido');
+    return { ok: false, status: 403, body: 'host no permitido' };
+
+  }
+
+  return { ok: true, urlStr };
+
+}
+
+/** Notion/S3 a veces responden 403 al fetch sin cabeceras de navegador (firma + política del bucket). */
+async function fetchUpstreamImageBuffer(urlStr: string): Promise<
+  | { ok: true; buf: Buffer; contentType: string }
+  | { ok: false; status: number; message: string }
+> {
+
+  const attempts: Array<Record<string, string>> = [
+    {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      Referer: 'https://www.notion.so/',
+    },
+    {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'image/*,*/*;q=0.8',
+      Referer: 'https://notion.so/',
+    },
+    {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'image/*,*/*;q=0.8',
+    },
+  ];
+
+  let r: Response | null = null;
+
+  for (const headers of attempts) {
+
+    r = await fetch(urlStr, {
+
+      redirect: 'follow',
+
+      headers,
+
+      signal: AbortSignal.timeout(45_000),
+
+    });
+
+    if (r.ok) break;
+
+    if (r.status !== 403 && r.status !== 401) break;
+
+  }
+
+  if (!r?.ok) {
+
+    const st = r?.status ?? 0;
+
+    console.warn('[ia360-doc/proxy-image] upstream', st, urlStr.slice(0, 140));
+
+    return {
+
+      ok: false,
+
+      status: 502,
+
+      message:
+
+        st === 403 || st === 401
+
+          ? 'acceso denegado o URL caducada (Notion ~1h); vuelva a pedir la respuesta al asistente'
+
+          : 'origen no disponible',
+
+    };
+
+  }
+
+  const buf = Buffer.from(await r.arrayBuffer());
+
+  const ctHdr = r.headers.get('content-type') || 'application/octet-stream';
+
+  const outType = ctHdr.split(';')[0].trim();
+
+  return { ok: true, buf, contentType: outType };
+
+}
+
+router.get('/ia360-doc/proxy-image', async (req, res) => {
+
+  const parsed = parseAllowedProxyImageUrl(req.query.url);
+
+  if (!parsed.ok) {
+
+    return res.status(parsed.status).type('text/plain').send(parsed.body);
 
   }
 
   try {
 
-    /** Notion/S3 a veces responden 403 al fetch sin cabeceras de navegador (firma + política del bucket). */
-    const attempts: Array<Record<string, string>> = [
-      {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        Referer: 'https://www.notion.so/',
-      },
-      {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        Accept: 'image/*,*/*;q=0.8',
-        Referer: 'https://notion.so/',
-      },
-      {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        Accept: 'image/*,*/*;q=0.8',
-      },
-    ];
+    const out = await fetchUpstreamImageBuffer(parsed.urlStr);
 
-    let r: Response | null = null;
+    if (!out.ok) {
 
-    for (const headers of attempts) {
-
-      r = await fetch(urlStr, {
-
-        redirect: 'follow',
-
-        headers,
-
-        signal: AbortSignal.timeout(45_000),
-
-      });
-
-      if (r.ok) break;
-
-      if (r.status !== 403 && r.status !== 401) break;
+      return res.status(out.status).type('text/plain').send(out.message);
 
     }
 
-    if (!r?.ok) {
-
-      const st = r?.status ?? 0;
-
-      console.warn('[ia360-doc/proxy-image] upstream', st, urlStr.slice(0, 140));
-
-      return res
-
-        .status(502)
-
-        .type('text/plain')
-
-        .send(
-
-          st === 403 || st === 401
-
-            ? 'acceso denegado o URL caducada (Notion ~1h); vuelva a pedir la respuesta al asistente'
-
-            : 'origen no disponible',
-
-        );
-
-    }
-
-    const buf = Buffer.from(await r.arrayBuffer());
-
-    const ctHdr = r.headers.get('content-type') || 'application/octet-stream';
-
-    const outType = ctHdr.split(';')[0].trim();
-
-    res.setHeader('Content-Type', outType);
+    res.setHeader('Content-Type', out.contentType);
 
     res.setHeader('Cache-Control', 'private, max-age=300');
 
-    return res.status(200).send(buf);
+    return res.status(200).send(out.buf);
 
   } catch (e) {
 
-    console.error('proxy-image:', e);
+    console.error('proxy-image GET:', e);
+
+    return res.status(502).type('text/plain').send('error al obtener imagen');
+
+  }
+
+});
+
+router.post('/ia360-doc/proxy-image', async (req, res) => {
+
+  const parsed = parseAllowedProxyImageUrl(req.body?.url);
+
+  if (!parsed.ok) {
+
+    return res.status(parsed.status).type('text/plain').send(parsed.body);
+
+  }
+
+  try {
+
+    const out = await fetchUpstreamImageBuffer(parsed.urlStr);
+
+    if (!out.ok) {
+
+      return res.status(out.status).type('text/plain').send(out.message);
+
+    }
+
+    res.setHeader('Content-Type', out.contentType);
+
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    return res.status(200).send(out.buf);
+
+  } catch (e) {
+
+    console.error('proxy-image POST:', e);
 
     return res.status(502).type('text/plain').send('error al obtener imagen');
 

@@ -24,7 +24,9 @@ function getNotion(): Client | null {
 function truncateText(text: string, maxChars?: number): string {
   const cap = maxChars ?? getMaxToolResultChars();
   if (text.length <= cap) return text;
-  return `${text.slice(0, cap - 50)}\n\n... [contenido truncado por longitud]`;
+  const cutPoint = text.lastIndexOf('\n', cap - 50);
+  const safePoint = cutPoint > cap / 2 ? cutPoint : cap - 50;
+  return `${text.slice(0, safePoint)}\n\n... [contenido truncado por longitud]`;
 }
 
 function richTextToString(rich: Array<{ plain_text?: string }> | undefined): string {
@@ -109,8 +111,9 @@ function parseBlocksToText(blocks: Array<Record<string, unknown>>): string {
       else if (img.type === 'file') url = img.file?.url ?? '';
       const caption = richTextToString(data.caption as Array<{ plain_text?: string }>);
       if (url) {
-        const label = caption || 'imagen del documento';
-        lines.push(`![${label}](${url})`);
+        // Ángulos: URLs firmadas de Notion/S3 suelen llevar &, ? y paréntesis; sin <> el Markdown se rompe.
+        const label = (caption || 'imagen del documento').replace(/\]/g, '');
+        lines.push(`![${label}](<${url}>)`);
       }
     } else if (btype === 'table_row') {
       const cells = (data.cells as Array<Array<{ plain_text?: string }>>) ?? [];
