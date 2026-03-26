@@ -30,7 +30,6 @@ import {
 
 import { isNotionConfigured } from '../services/ia360NotionService.js';
 
-import { stripMarkdownImagesForCrm } from '../utils/ia360CrmText.js';
 
 import { findConversacionActivaIa360 } from '../services/conversacionActivaUnica.js';
 
@@ -344,14 +343,8 @@ async function guardarEnMensajesCrm(
 
   const tipoEmisor = rol === 'usuario' ? 'CONTACTO' : 'IA360';
 
-  /** Respuestas IA360: guardar texto sin markdown de imágenes (URLs Notion no se persisten). */
-  const contenidoDb =
-
-    tipoEmisor === 'IA360'
-
-      ? stripMarkdownImagesForCrm(contenido)
-
-      : contenido.trim();
+  /** Incluye ![alt](url) para que el widget/historial pueda mostrar imágenes vía proxy (URLs Notion/S3 pueden caducar). */
+  const contenidoDb = contenido.trim();
 
 
 
@@ -1191,7 +1184,21 @@ router.get('/ia360-doc/proxy-image', async (req, res) => {
 
   const raw = req.query.url;
 
-  const urlStr = typeof raw === 'string' ? raw.trim() : '';
+  let urlStr = typeof raw === 'string' ? raw.trim() : '';
+
+  if (urlStr.includes('%25')) {
+
+    try {
+
+      urlStr = decodeURIComponent(urlStr);
+
+    } catch {
+
+      /* mantener urlStr */
+
+    }
+
+  }
 
   if (!urlStr || !urlStr.startsWith('https://')) {
 

@@ -1,6 +1,6 @@
 /**
- * El CRM guarda solo texto; las URLs de imágenes de Notion son largas y caducan.
- * No se almacenan referencias a imágenes en BD (solo texto útil para auditoría).
+ * Opcional si en el futuro se vuelve a acortar mensajes IA360 en BD.
+ * Hoy las respuestas IA360 se guardan con markdown completo para el historial en el widget.
  */
 export function stripMarkdownImagesForCrm(contenido: string): string {
   return contenido
