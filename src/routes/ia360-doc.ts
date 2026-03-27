@@ -728,7 +728,34 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
       .select('id_mensaje', 'tipo_emisor', 'contenido', 'creado_en');
 
-
+    /** Reintenta descargar imágenes Notion/S3 al cargar historial (solo respuesta; no escribe BD). */
+    const rows = filas.map((r) => ({ ...r }));
+    const histInlineOff =
+      process.env.IA360_HISTORIAL_INLINE_IMAGES?.trim().toLowerCase() === 'false' ||
+      process.env.IA360_HISTORIAL_INLINE_IMAGES?.trim().toLowerCase() === '0';
+    if (!histInlineOff) {
+      const rawMax = process.env.IA360_HISTORIAL_INLINE_MAX_MESSAGES?.trim();
+      const maxMsgs = Math.min(
+        200,
+        Math.max(1, rawMax ? parseInt(rawMax, 10) || 35 : 35),
+      );
+      const indices: number[] = [];
+      for (let i = rows.length - 1; i >= 0 && indices.length < maxMsgs; i--) {
+        const te = String(rows[i].tipo_emisor || '').toUpperCase();
+        if (te !== 'IA360') continue;
+        const c = String(rows[i].contenido ?? '');
+        if (!c.includes('https://')) continue;
+        if (c.includes('data:image/')) continue;
+        indices.push(i);
+      }
+      for (const i of indices) {
+        try {
+          rows[i].contenido = await inlineNotionImagesInMarkdown(String(rows[i].contenido));
+        } catch (e) {
+          console.warn('[ia360-doc/historial] inline imágenes omitido mensaje', rows[i].id_mensaje, e);
+        }
+      }
+    }
 
     return res.json({
 
@@ -742,9 +769,9 @@ router.get('/ia360-doc/historial', async (req, res) => {
 
       canal: String(conv.canal || CANAL_IA360),
 
-      total: filas.length,
+      total: rows.length,
 
-      mensajes: filas.map((r) => {
+      mensajes: rows.map((r) => {
 
         const te = String(r.tipo_emisor || '').toUpperCase();
 
@@ -982,9 +1009,9 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    let reply = chatResult.reply ?? '';
+    const replyForDb = chatResult.reply ?? '';
 
-    if (!reply.trim()) {
+    if (!replyForDb.trim()) {
 
       return res.status(502).json({
 
@@ -996,14 +1023,15 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
     }
 
-    reply = await inlineNotionImagesInMarkdown(reply);
+    /** En BD solo URLs Notion/S3 (ligero); al cliente se envía versión con data: para mostrar sin caducar en sesión. */
+    const replyForClient = await inlineNotionImagesInMarkdown(replyForDb);
 
-    const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', reply);
+    const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', replyForDb);
 
     if (!asstSaved) {
       return res.json({
         success: true,
-        reply,
+        reply: replyForClient,
         warning: 'Respuesta generada pero no se pudo guardar en CRM',
         conversacion_id: convId,
       });
@@ -1011,7 +1039,7 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
     return res.json({
       success: true,
-      reply,
+      reply: replyForClient,
       conversacion_id: convId,
     });
 
