@@ -30,7 +30,10 @@ import {
 
 import { isNotionConfigured } from '../services/ia360NotionService.js';
 
-import { inlineNotionImagesInMarkdown } from '../services/ia360InlineImagesService.js';
+import {
+  inlineNotionImagesInMarkdown,
+  stripMarkdownImages,
+} from '../services/ia360InlineImagesService.js';
 
 import { findConversacionActivaIa360 } from '../services/conversacionActivaUnica.js';
 
@@ -1009,9 +1012,9 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    const replyForDb = chatResult.reply ?? '';
+    const replyRaw = chatResult.reply ?? '';
 
-    if (!replyForDb.trim()) {
+    if (!replyRaw.trim()) {
 
       return res.status(502).json({
 
@@ -1023,8 +1026,13 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
     }
 
-    /** En BD solo URLs Notion/S3 (ligero); al cliente se envía versión con data: para mostrar sin caducar en sesión. */
-    const replyForClient = await inlineNotionImagesInMarkdown(replyForDb);
+    /** Respuesta HTTP: imágenes en data:. En BD: solo texto, sin ![...](url) ni rutas. */
+    const replyForClient = await inlineNotionImagesInMarkdown(replyRaw);
+    let replyForDb = stripMarkdownImages(replyRaw);
+    if (!replyForDb.trim()) {
+      replyForDb =
+        '(El asistente respondió con capturas; las ilustraciones solo se muestran en el chat en vivo.)';
+    }
 
     const asstSaved = await guardarEnMensajesCrm(empresaId, contactoId, convId, 'asistente', replyForDb);
 

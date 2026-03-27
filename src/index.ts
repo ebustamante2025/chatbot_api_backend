@@ -217,7 +217,7 @@ app.get('/', (req, res) => {
           'GET /api/ia360-doc/historial?token=xxx&limite=500 — Todas las interacciones IA360 de ese contacto (cliente)',
         mensaje:
           'POST /api/ia360-doc/mensaje — Body: { token, rol: usuario|asistente, contenido, servicio? }. Solo tabla mensajes (CONTACTO / IA360), canal IA360_DOC',
-        chat: 'POST /api/ia360-doc/chat — Body: { token, message, history?, servicio? }. OpenAI + Notion; reply JSON lleva imágenes en data:; BD guarda solo markdown con URLs Notion/S3',
+        chat: 'POST /api/ia360-doc/chat — Body: { token, message, history?, servicio? }. OpenAI + Notion; reply JSON con imágenes en data:; BD guarda texto sin líneas ![ ](url)',
         chatQuery:
           'POST /api/ia360-doc/chat-query — Solo si IA360_PUBLIC_QUERY_CHAT=true: { message, history? }. Sin JWT ni CRM (pruebas de latencia)',
         proxyImage:

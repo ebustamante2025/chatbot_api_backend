@@ -1,7 +1,6 @@
 /**
- * Descarga imágenes Notion/S3 al generar la respuesta IA360 y las sustituye por data URIs
- * en el markdown (misma idea que chatbot_Agente01/utils.py _store_image).
- * Así el CRM y el widget no dependen de URLs prefirmadas que caducan (~1 h).
+ * Descarga imágenes Notion/S3 para la respuesta JSON del chat (data URIs).
+ * En BD no se persisten URLs ni base64: usar stripMarkdownImages sobre el markdown del modelo.
  */
 function clampInt(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -13,6 +12,11 @@ function readEnvInt(name: string, defaultVal: number, lo: number, hi: number): n
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n)) return defaultVal;
   return clampInt(n, lo, hi);
+}
+
+function serverLogIa360Images(): boolean {
+  const v = process.env.IA360_LOG_IMAGES?.trim().toLowerCase();
+  return v === 'true' || v === '1';
 }
 
 export function isIa360InlineImagesHost(hostname: string): boolean {
@@ -134,6 +138,16 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
   const matches = findMarkdownHttpsImages(markdown);
   if (!matches.length) return markdown;
 
+  if (serverLogIa360Images()) {
+    console.info(
+      '[IA360 imagen][servidor] inlining: el modelo incluyó %d imagen(es) con URL https',
+      matches.length,
+    );
+    matches.forEach((hit, i) => {
+      console.info('[IA360 imagen][servidor]   link [%d/%d]: %s', i + 1, matches.length, hit.url);
+    });
+  }
+
   let totalRawBytes = 0;
   let fetchCount = 0;
   const cache = new Map<string, string | null>();
@@ -160,8 +174,15 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
       return null;
     }
 
+    if (serverLogIa360Images()) {
+      console.info('[IA360 imagen][servidor] descargando imagen — link:', url);
+    }
+
     const dataUri = await fetchImageAsDataUri(url, maxPerImg);
     if (!dataUri) {
+      if (serverLogIa360Images()) {
+        console.warn('[IA360 imagen][servidor] descarga falló — link:', url);
+      }
       cache.set(url, null);
       return null;
     }
@@ -176,6 +197,13 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
     totalRawBytes += approxRaw;
     fetchCount++;
     cache.set(url, dataUri);
+    if (serverLogIa360Images()) {
+      console.info(
+        '[IA360 imagen][servidor] inline OK — link: %s → ~%d bytes (data URI)',
+        url,
+        approxRaw,
+      );
+    }
     return dataUri;
   }
 
@@ -197,4 +225,17 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
   }
   out += markdown.slice(last);
   return out;
+}
+
+/**
+ * Quita del markdown todas las imágenes (https y data:) para no persistir rutas ni base64 en BD.
+ */
+export function stripMarkdownImages(markdown: string): string {
+  let t = markdown;
+  t = t.replace(/!\[[^\]]*\]\(<https?:\/\/[^>\s]+>\)/gi, '');
+  t = t.replace(/!\[[^\]]*\]\(https?:\/\/[^)\s\n]+\)/gi, '');
+  t = t.replace(/!\[[^\]]*\]\(<data:image\/[^>]+>\)/gi, '');
+  t = t.replace(/!\[[^\]]*\]\(data:image\/[^)\s]+\)/gi, '');
+  t = t.replace(/\n{3,}/g, '\n\n');
+  return t.trim();
 }
