@@ -31,9 +31,13 @@ import {
 import { isNotionConfigured } from '../services/ia360NotionService.js';
 
 import {
+  compactDataUriImagesInMarkdown,
+  compactImgPlaceholdersInMarkdown,
   inlineNotionImagesInMarkdown,
   stripMarkdownImages,
 } from '../services/ia360InlineImagesService.js';
+
+import { getIa360ImagesPayload, runWithIa360ImageStore } from '../services/ia360ImageStore.js';
 
 import { findConversacionActivaIa360 } from '../services/conversacionActivaUnica.js';
 
@@ -922,7 +926,10 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
       ) {
 
-        history.push({ role: h.role, content: h.content });
+        history.push({
+          role: h.role,
+          content: compactImgPlaceholdersInMarkdown(compactDataUriImagesInMarkdown(h.content)),
+        });
 
       }
 
@@ -988,46 +995,33 @@ router.post('/ia360-doc/chat', async (req, res) => {
 
 
 
-    const chatResult = await runIa360Chat({
-
-      userMessage: msg,
-
-      history,
-
+    const { chatResult, ia360Images } = await runWithIa360ImageStore(async () => {
+      const cr = await runIa360Chat({
+        userMessage: msg,
+        history,
+      });
+      const imgs = getIa360ImagesPayload();
+      return { chatResult: cr, ia360Images: imgs };
     });
 
-
-
     if (chatResult.error) {
-
       return res.status(502).json({
-
         success: false,
-
         message: chatResult.error,
-
       });
-
     }
-
-
 
     const replyRaw = chatResult.reply ?? '';
 
     if (!replyRaw.trim()) {
-
       return res.status(502).json({
-
         success: false,
-
         message: 'El modelo no devolvió respuesta.',
-
       });
-
     }
 
-    /** Respuesta HTTP: imágenes en data:. En BD: solo texto, sin ![...](url) ni rutas. */
-    const replyForClient = await inlineNotionImagesInMarkdown(replyRaw);
+    /** Igual que Agente01: reply con ![alt](IMG:XXXX); el mapa trae data: o URL. Sin re-descargar tras el modelo. */
+    const replyForClient = replyRaw;
     let replyForDb = stripMarkdownImages(replyRaw);
     if (!replyForDb.trim()) {
       replyForDb =
@@ -1040,6 +1034,7 @@ router.post('/ia360-doc/chat', async (req, res) => {
       return res.json({
         success: true,
         reply: replyForClient,
+        ia360Images,
         warning: 'Respuesta generada pero no se pudo guardar en CRM',
         conversacion_id: convId,
       });
@@ -1048,6 +1043,7 @@ router.post('/ia360-doc/chat', async (req, res) => {
     return res.json({
       success: true,
       reply: replyForClient,
+      ia360Images,
       conversacion_id: convId,
     });
 
@@ -1149,7 +1145,10 @@ router.post('/ia360-doc/chat-query', async (req, res) => {
 
       ) {
 
-        history.push({ role: h.role, content: h.content });
+        history.push({
+          role: h.role,
+          content: compactImgPlaceholdersInMarkdown(compactDataUriImagesInMarkdown(h.content)),
+        });
 
       }
 
@@ -1157,36 +1156,27 @@ router.post('/ia360-doc/chat-query', async (req, res) => {
 
 
 
-    const chatResult = await runIa360Chat({ userMessage: msg, history });
-
-
+    const { chatResult, ia360Images } = await runWithIa360ImageStore(async () => {
+      const cr = await runIa360Chat({ userMessage: msg, history });
+      const imgs = getIa360ImagesPayload();
+      return { chatResult: cr, ia360Images: imgs };
+    });
 
     if (chatResult.error) {
-
       return res.status(502).json({ success: false, message: chatResult.error });
-
     }
 
-
-
-    let reply = chatResult.reply ?? '';
+    const reply = chatResult.reply ?? '';
 
     if (!reply.trim()) {
-
       return res.status(502).json({ success: false, message: 'El modelo no devolvió respuesta.' });
-
     }
 
-    reply = await inlineNotionImagesInMarkdown(reply);
-
     return res.json({
-
       success: true,
-
       reply,
-
+      ia360Images,
       note: 'Modo solo consulta: no se persistió en CRM ni se validó identidad.',
-
     });
 
   } catch (error) {

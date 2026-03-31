@@ -123,8 +123,53 @@ async function fetchImageAsDataUri(urlStr: string, maxBytes: number): Promise<st
   return `data:${ct};base64,${buf.toString('base64')}`;
 }
 
+function orderedUniqueImageUrls(matches: ImgMatch[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const hit of matches) {
+    if (seen.has(hit.url)) continue;
+    seen.add(hit.url);
+    out.push(hit.url);
+  }
+  return out;
+}
+
+async function prefetchImageDataUri(url: string, maxPerImg: number): Promise<{ url: string; dataUri: string | null }> {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:' || !isIa360InlineImagesHost(u.hostname)) {
+      return { url, dataUri: null };
+    }
+  } catch {
+    return { url, dataUri: null };
+  }
+
+  if (serverLogIa360Images()) {
+    console.info('[IA360 imagen][servidor] descargando imagen — link:', url);
+  }
+
+  const dataUri = await fetchImageAsDataUri(url, maxPerImg);
+  if (!dataUri) {
+    if (serverLogIa360Images()) {
+      console.warn('[IA360 imagen][servidor] descarga falló — link:', url);
+    }
+    return { url, dataUri: null };
+  }
+
+  if (serverLogIa360Images()) {
+    const approxRaw = Math.floor((dataUri.length * 3) / 4);
+    console.info(
+      '[IA360 imagen][servidor] inline OK — link: %s → ~%d bytes (data URI)',
+      url,
+      approxRaw,
+    );
+  }
+  return { url, dataUri };
+}
+
 /**
  * Sustituye `![alt](url https)` de hosts Notion/S3 por `![alt](data:image/...;base64,...)` cuando la descarga tiene éxito.
+ * Las descargas van en paralelo por lotes (IA360_INLINE_FETCH_CONCURRENCY) para acortar el tiempo tras la respuesta del modelo.
  * Desactivar: IA360_INLINE_IMAGES=false
  */
 export async function inlineNotionImagesInMarkdown(markdown: string): Promise<string> {
@@ -134,6 +179,7 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
   const maxPerImg = readEnvInt('IA360_INLINE_IMAGE_MAX_BYTES', 900_000, 20_000, 8_000_000);
   const maxTotal = readEnvInt('IA360_INLINE_IMAGE_MAX_TOTAL_BYTES', 8_000_000, 200_000, 40_000_000);
   const maxCount = readEnvInt('IA360_INLINE_IMAGE_MAX_COUNT', 24, 1, 80);
+  const concurrency = readEnvInt('IA360_INLINE_FETCH_CONCURRENCY', 6, 1, 16);
 
   const matches = findMarkdownHttpsImages(markdown);
   if (!matches.length) return markdown;
@@ -148,63 +194,38 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
     });
   }
 
+  const orderedUniq = orderedUniqueImageUrls(matches);
+  const urlsToPrefetch = orderedUniq.slice(0, maxCount);
+
+  const prelim = new Map<string, string | null>();
+  for (let i = 0; i < urlsToPrefetch.length; i += concurrency) {
+    const chunk = urlsToPrefetch.slice(i, i + concurrency);
+    const results = await Promise.all(chunk.map((u) => prefetchImageDataUri(u, maxPerImg)));
+    for (const { url, dataUri } of results) {
+      prelim.set(url, dataUri);
+    }
+  }
+
   let totalRawBytes = 0;
-  let fetchCount = 0;
+  let accepted = 0;
   const cache = new Map<string, string | null>();
-
-  async function resolve(url: string): Promise<string | null> {
-    if (cache.has(url)) return cache.get(url)!;
-    try {
-      const u = new URL(url);
-      if (u.protocol !== 'https:') {
-        cache.set(url, null);
-        return null;
-      }
-      if (!isIa360InlineImagesHost(u.hostname)) {
-        cache.set(url, null);
-        return null;
-      }
-    } catch {
+  for (const url of orderedUniq) {
+    const raw = prelim.get(url);
+    if (!raw) {
       cache.set(url, null);
-      return null;
+      continue;
     }
-
-    if (fetchCount >= maxCount) {
-      cache.set(url, null);
-      return null;
-    }
-
-    if (serverLogIa360Images()) {
-      console.info('[IA360 imagen][servidor] descargando imagen — link:', url);
-    }
-
-    const dataUri = await fetchImageAsDataUri(url, maxPerImg);
-    if (!dataUri) {
-      if (serverLogIa360Images()) {
-        console.warn('[IA360 imagen][servidor] descarga falló — link:', url);
+    const approxRaw = Math.floor((raw.length * 3) / 4);
+    if (accepted >= maxCount || totalRawBytes + approxRaw > maxTotal) {
+      if (raw) {
+        console.warn('[ia360-inline-images] límite total o cantidad, se mantiene URL', url.slice(0, 80));
       }
       cache.set(url, null);
-      return null;
+      continue;
     }
-
-    const approxRaw = Math.floor((dataUri.length * 3) / 4);
-    if (totalRawBytes + approxRaw > maxTotal) {
-      console.warn('[ia360-inline-images] límite total alcanzado, se mantiene URL', url.slice(0, 80));
-      cache.set(url, null);
-      return null;
-    }
-
+    accepted++;
     totalRawBytes += approxRaw;
-    fetchCount++;
-    cache.set(url, dataUri);
-    if (serverLogIa360Images()) {
-      console.info(
-        '[IA360 imagen][servidor] inline OK — link: %s → ~%d bytes (data URI)',
-        url,
-        approxRaw,
-      );
-    }
-    return dataUri;
+    cache.set(url, raw);
   }
 
   let out = '';
@@ -213,7 +234,7 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
     out += markdown.slice(last, hit.start);
     let replacement = markdown.slice(hit.start, hit.end);
     try {
-      const dataUri = await resolve(hit.url);
+      const dataUri = cache.get(hit.url) ?? null;
       if (dataUri) {
         replacement = `![${hit.alt}](${dataUri})`;
       }
@@ -227,6 +248,16 @@ export async function inlineNotionImagesInMarkdown(markdown: string): Promise<st
   return out;
 }
 
+/** Sustituye ![alt](data:...) por texto corto para historial de chat (evita payloads enormes y tokens). */
+export function compactDataUriImagesInMarkdown(markdown: string): string {
+  return markdown.replace(/!\[([^\]]*)\]\(data:image\/[^)]+\)/gi, '*(Imagen en mensaje anterior: $1)*');
+}
+
+/** Evita colisionar IMG:0001 del turno anterior con el almacén del nuevo request. */
+export function compactImgPlaceholdersInMarkdown(markdown: string): string {
+  return markdown.replace(/!\[([^\]]*)\]\(IMG:\d{4}\)/gi, '*(Imagen en mensaje anterior: $1)*');
+}
+
 /**
  * Quita del markdown todas las imágenes (https y data:) para no persistir rutas ni base64 en BD.
  */
@@ -234,6 +265,7 @@ export function stripMarkdownImages(markdown: string): string {
   let t = markdown;
   t = t.replace(/!\[[^\]]*\]\(<https?:\/\/[^>\s]+>\)/gi, '');
   t = t.replace(/!\[[^\]]*\]\(https?:\/\/[^)\s\n]+\)/gi, '');
+  t = t.replace(/!\[[^\]]*\]\(IMG:\d{4}\)/gi, '');
   t = t.replace(/!\[[^\]]*\]\(<data:image\/[^>]+>\)/gi, '');
   t = t.replace(/!\[[^\]]*\]\(data:image\/[^)\s]+\)/gi, '');
   t = t.replace(/\n{3,}/g, '\n\n');

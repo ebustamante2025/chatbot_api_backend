@@ -2,6 +2,7 @@
  * Herramientas Notion para IA360 (misma idea que chatbot_Agente/notion_tools.py).
  */
 import { Client, APIResponseError } from '@notionhq/client';
+import { isIa360ImageStoreActive, storeIa360ImageFromUrl } from './ia360ImageStore.js';
 
 const MAX_RETRIES = 3;
 
@@ -77,7 +78,7 @@ function parsePageProperties(properties: Record<string, unknown>): string {
   return lines.length ? lines.join('\n') : '(sin propiedades)';
 }
 
-function parseBlocksToText(blocks: Array<Record<string, unknown>>): string {
+async function parseBlocksToTextAsync(blocks: Array<Record<string, unknown>>): Promise<string> {
   const lines: string[] = [];
   for (const block of blocks) {
     const btype = String(block.type ?? '');
@@ -111,9 +112,18 @@ function parseBlocksToText(blocks: Array<Record<string, unknown>>): string {
       else if (img.type === 'file') url = img.file?.url ?? '';
       const caption = richTextToString(data.caption as Array<{ plain_text?: string }>);
       if (url) {
-        // Ángulos: URLs firmadas de Notion/S3 suelen llevar &, ? y paréntesis; sin <> el Markdown se rompe.
         const label = (caption || 'imagen del documento').replace(/\]/g, '');
-        lines.push(`![${label}](<${url}>)`);
+        if (isIa360ImageStoreActive()) {
+          try {
+            const key = await storeIa360ImageFromUrl(url);
+            lines.push(`![${label}](${key})`);
+          } catch (e) {
+            console.warn('[ia360-notion] store imagen:', e);
+            lines.push(`![${label}](<${url}>)`);
+          }
+        } else {
+          lines.push(`![${label}](<${url}>)`);
+        }
       }
     } else if (btype === 'table_row') {
       const cells = (data.cells as Array<Array<{ plain_text?: string }>>) ?? [];
@@ -274,7 +284,7 @@ export async function executeIa360NotionTool(
         if (!pageId) return 'Error: falta page_id.';
         const blocks = await collectBlocksDepthFirst(notion, pageId);
         if (!blocks.length) return 'La pagina esta vacia o no tiene contenido de bloques.';
-        return truncateText(parseBlocksToText(blocks));
+        return truncateText(await parseBlocksToTextAsync(blocks));
       }
       case 'query_database': {
         const databaseId = String(args.database_id ?? '');

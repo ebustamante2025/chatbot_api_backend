@@ -53,9 +53,10 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Middleware (IA360 puede enviar history grande si hay data: en mensajes; el widget ya lo reduce)
+const jsonBodyLimit = process.env.JSON_BODY_LIMIT?.trim() || '15mb';
+app.use(express.json({ limit: jsonBodyLimit }));
+app.use(express.urlencoded({ extended: true, limit: jsonBodyLimit }));
 
 // Asegurar que las respuestas JSON se envíen como UTF-8 (evitar ?? en tildes/ñ en el CRM)
 app.use((_req, res, next) => {
@@ -217,7 +218,7 @@ app.get('/', (req, res) => {
           'GET /api/ia360-doc/historial?token=xxx&limite=500 — Todas las interacciones IA360 de ese contacto (cliente)',
         mensaje:
           'POST /api/ia360-doc/mensaje — Body: { token, rol: usuario|asistente, contenido, servicio? }. Solo tabla mensajes (CONTACTO / IA360), canal IA360_DOC',
-        chat: 'POST /api/ia360-doc/chat — Body: { token, message, history?, servicio? }. OpenAI + Notion; reply JSON con imágenes en data:; BD guarda texto sin líneas ![ ](url)',
+        chat: 'POST /api/ia360-doc/chat — Body: { token, message, history?, servicio? }. OpenAI + Notion; reply con ![ ](IMG:0001) + ia360Images { data: o URL }; BD sin ![ ](url|IMG:)',
         chatQuery:
           'POST /api/ia360-doc/chat-query — Solo si IA360_PUBLIC_QUERY_CHAT=true: { message, history? }. Sin JWT ni CRM (pruebas de latencia)',
         proxyImage:
