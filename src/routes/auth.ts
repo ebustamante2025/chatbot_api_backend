@@ -19,7 +19,7 @@ router.post('/login', async (req, res) => {
     }
 
     const usuario = await db('usuarios_soporte')
-      .where({ username: username.trim(), estado: true })
+      .whereRaw('LOWER(username) = ? AND estado = true', [username.trim().toLowerCase()])
       .select('id_usuario', 'username', 'rol', 'password_hash')
       .first();
 
@@ -30,9 +30,18 @@ router.post('/login', async (req, res) => {
       });
     }
 
+    const hashStored = usuario.password_hash;
+    if (!hashStored || typeof hashStored !== 'string') {
+      console.error('Login: password_hash ausente o inválido para usuario', usuario.id_usuario);
+      return res.status(500).json({
+        error: 'Error interno del servidor',
+        message: 'Cuenta mal configurada. Contacte al administrador.',
+      });
+    }
+
     // Detectar si la contraseña es temporal (prefijo TEMP:)
-    const esTemporal = usuario.password_hash.startsWith('TEMP:');
-    const hashReal = esTemporal ? usuario.password_hash.substring(5) : usuario.password_hash;
+    const esTemporal = hashStored.startsWith('TEMP:');
+    const hashReal = esTemporal ? hashStored.substring(5) : hashStored;
 
     const validPassword = await bcrypt.compare(password, hashReal);
     if (!validPassword) {

@@ -1,6 +1,16 @@
-# Backend + PostgreSQL - Desplegar PRIMERO (crea la red compartida)
-# Las contraseñas se leen desde .env (copiar .env.example a .env y configurar).
-# NO subas .env a Git.
+# Backend + PostgreSQL — desplegar primero (crea la red crm-chatbot-network).
+#
+# --- Producción (servidor Linux / Docker) ---
+# Deje un archivo .env en ESTA carpeta con JWT_SECRET, POSTGRES_*, etc.
+#   docker compose up -d --build
+# Compose lee .env automáticamente para ${...} (no hace falta --env-file).
+#
+# --- Desarrollo con Docker en su PC ---
+# Copie .env.development.example → .env.development (valores locales) y:
+#   docker compose --env-file .env.development up -d --build
+#
+# Plantillas: .env.development.example | .env.production.example
+# Localhost sin Docker (npm run dev): use solo .env en esta carpeta (ver .env.example).
 
 services:
   postgres:
@@ -12,7 +22,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -37,15 +47,15 @@ services:
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       DB_SSL: "false"
-      PORT: 3001
-      NODE_ENV: production
+      PORT: ${API_INTERNAL_PORT:-3001}
+      NODE_ENV: ${NODE_ENV:-production}
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
       LICENCIA_API_URL: ${LICENCIA_API_URL:-}
       CODIGO_APLICATIVO: ${CODIGO_APLICATIVO:-1}
       EDICION_APLICATIVO: ${EDICION_APLICATIVO:-1}
     ports:
-      - "3001:3001"
+      - "${API_PORT:-3001}:${API_INTERNAL_PORT:-3001}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,7 +72,7 @@ services:
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
-      - "5050:80"
+      - "${PGADMIN_PORT:-5050}:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:

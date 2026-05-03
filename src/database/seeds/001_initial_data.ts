@@ -31,7 +31,7 @@ export async function seed(knex: Knex): Promise<void> {
 
   // 2. Insertar usuarios de soporte (agentes)
   const passwordHash = await bcrypt.hash('admin123', 10);
-  
+
   const [adminUser] = await knex('usuarios_soporte')
     .insert({
       username: 'admin',

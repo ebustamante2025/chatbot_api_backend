@@ -8,8 +8,14 @@
 import { MENSAJES_VALIDACION } from '../data/mensajesValidacion.js';
 
 const LICENCIA_API_URL =
-  process.env.LICENCIA_API_URL ||
+   process.env.LICENCIA_API_URL ||
   'http://atila.hgi.com.co:8880/HGInetSecurityLicencia/Api/HelpHGIApiController/ValidarLicencia';
+
+/**  
+  process.env.LICENCIA_API_URL ||
+  'https://licensing.hginet.com.co/HGInetSecurityLicencia/Api/HelpHGIApiController/ValidarLicencia';
+  **/
+
 
 export interface ContratoVigente {
   Codigo: string;

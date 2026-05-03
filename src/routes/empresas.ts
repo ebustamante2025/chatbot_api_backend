@@ -132,7 +132,7 @@ router.post('/', async (req, res) => {
     });
   } catch (error: any) {
     console.error('Error al crear empresa:', error);
-    
+
     // Error de constraint único
     if (error.code === '23505') {
       return res.status(409).json({

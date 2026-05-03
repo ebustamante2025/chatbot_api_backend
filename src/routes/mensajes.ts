@@ -1,11 +1,14 @@
 import express from 'express';
 import { db } from '../database/connection.js';
 import { getIO } from '../socket.js';
+import { CANAL_WIDGET_AGENTE } from '../services/widgetInactividad.js';
 import { sendTelegramMessage } from '../services/telegramService.js';
 import type { JwtPayload } from '../middleware/auth.js';
 
 const router = express.Router();
 const EDICION_MENSAJE_MAX_MINUTOS = 3;
+const PREFIJO_PRESENTACION_AGENTE = 'Hola, soy ';
+const PREFIJO_SOLICITUD_SERVICIO_CONTACTO = 'Solicito soporte para el servicio:';
 
 // Obtener mensajes de una conversación
 router.get('/conversacion/:conversacion_id', async (req, res) => {
@@ -155,6 +158,14 @@ router.post('/', async (req, res) => {
       .where('id_conversacion', conversacion_id)
       .update({ ultima_actividad_en: db.raw('now()') });
 
+    // Reloj de inactividad del contacto (solo widget agente): cualquier mensaje CONTACTO reinicia avisos
+    if (tipo_emisor === 'CONTACTO' && String(conversacion.canal || '').trim() === CANAL_WIDGET_AGENTE) {
+      await db('conversaciones').where('id_conversacion', conversacionIdNum).update({
+        ultima_actividad_cliente_en: db.raw('now()'),
+        inactividad_fase: 0,
+      });
+    }
+
     // Si el agente envía un mensaje y la conversación está ASIGNADA, pasar a ACTIVA
     if (tipo_emisor === 'AGENTE' && conversacion.estado === 'ASIGNADA') {
       await db('conversaciones')
@@ -298,6 +309,12 @@ router.put('/contacto/:id', async (req, res) => {
         message: 'Solo se pueden editar mensajes enviados por el contacto.',
       });
     }
+    if (String(mensaje.contenido || '').trim().startsWith(PREFIJO_SOLICITUD_SERVICIO_CONTACTO)) {
+      return res.status(403).json({
+        error: 'No permitido',
+        message: 'Los mensajes automáticos de solicitud de soporte no se pueden editar.',
+      });
+    }
     if (Number(mensaje.contacto_id) !== Number(contacto_id) || Number(mensaje.conversacion_id) !== Number(conversacion_id) || Number(mensaje.empresa_id) !== Number(empresa_id)) {
       return res.status(403).json({
         error: 'No autorizado',
@@ -422,6 +439,12 @@ router.put('/:id', async (req, res) => {
       return res.status(403).json({
         error: 'No permitido',
         message: 'Solo puedes editar tus propios mensajes (los que envías tú como agente). No se pueden editar los mensajes que llegan del widget.',
+      });
+    }
+    if (String(mensaje.contenido || '').startsWith(PREFIJO_PRESENTACION_AGENTE)) {
+      return res.status(403).json({
+        error: 'No permitido',
+        message: 'Los mensajes de presentación automática no se pueden editar.',
       });
     }
     if (Number(mensaje.usuario_id) !== Number(user.id_usuario)) {

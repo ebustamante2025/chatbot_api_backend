@@ -5,6 +5,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import { testConnection, closeConnection, db } from './database/connection.js';
+import { startWidgetInactividadTicker, stopWidgetInactividadTicker } from './services/widgetInactividad.js';
 import { isTelegramConfigured, getTelegramBotMe } from './services/telegramService.js';
 import empresasRouter from './routes/empresas.js';
 import contactosRouter from './routes/contactos.js';
@@ -17,8 +18,10 @@ import preguntasFrecuentesRouter from './routes/preguntas-frecuentes.js';
 import faqAccesoRouter from './routes/faq-acceso.js';
 import ia360DocRouter from './routes/ia360-doc.js';
 import dashboardRouter from './routes/dashboard.js';
+import adminWidgetPoliticasInactividadRouter from './routes/admin-widget-politicas-inactividad.js';
 import webhookProxyRouter from './routes/webhook-proxy.js';
 import telegramRouter from './routes/telegram.js';
+import menusWidRouter from './routes/menus-wid.js';
 import { authMiddleware } from './middleware/auth.js';
 import { initSocket } from './socket.js';
 
@@ -131,15 +134,20 @@ app.get('/api/telegram/status', async (_req, res) => {
 // Rutas de empresas
 app.use('/api/empresas', empresasRouter);
 
+// Menús del widget (público: GET, admin: PUT)
+app.use('/api/menus-wid', menusWidRouter);
+
 // Rutas de contactos
 app.use('/api/contactos', contactosRouter);
 
 // Auth (público)
 app.use('/api/auth', authRouter);
 
-// Rutas de conversaciones: POST a / (crear) es público (widget); el resto requiere token
+// Rutas de conversaciones: POST a / (crear) y solicitud de cierre desde widget son públicos; el resto requiere token
 app.use('/api/conversaciones', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (req.method === 'POST' && req.path === '/') return next();
+  if (req.method === 'POST' && /^\/widget\/\d+\/solicitud-cierre\/?$/.test(req.path)) return next();
+  if (req.method === 'POST' && /^\/widget\/\d+\/heartbeat-actividad\/?$/.test(req.path)) return next();
   return authMiddleware(req, res, next);
 }, conversacionesRouter);
 
@@ -160,6 +168,9 @@ app.use('/api/usuarios-soporte', (req: express.Request, res: express.Response, n
 // Dashboard admin: requiere token
 app.use('/api/dashboard', authMiddleware, dashboardRouter);
 
+// Política global widget (inactividad): solo ADMIN, JWT
+app.use('/api/admin/widget-politicas-inactividad', authMiddleware, adminWidgetPoliticasInactividadRouter);
+
 // Temas de preguntas frecuentes: GET público (frontend FAQ), POST/PUT/DELETE requiere token
 app.use('/api/temas-preguntas', (req, res, next) => {
   if (req.method === 'GET') return next();
@@ -175,11 +186,12 @@ app.use('/api/preguntas-frecuentes', (req, res, next) => {
 // Acceso a FAQ: validación NIT + usuario (widget obtiene token, front FAQ valida)
 app.use('/api/faq-acceso', faqAccesoRouter);
 
+// Proxy de webhooks (ruta más específica) ANTES del router IA360 montado en `/api`,
+// para que POST /api/webhook-proxy/registro no quede atrapado sin coincidencia en IA360 → 404.
+app.use('/api/webhook-proxy', webhookProxyRouter);
+
 // IA360 (asistente documentación Streamlit): contexto empresa/director y mensajes en BD
 app.use('/api', ia360DocRouter);
-
-// Proxy de webhooks externos (agente Isa): evita CORS desde el widget
-app.use('/api/webhook-proxy', webhookProxyRouter);
 
 // Telegram: webhook público para recibir mensajes (envío a Telegram se hace en mensajes.ts)
 app.use('/api/telegram', telegramRouter);
@@ -259,11 +271,13 @@ const server = app.listen(PORT, async () => {
   console.log(`🔌 WebSocket habilitado en ws://localhost:${PORT}`);
   console.log(`📊 Entorno: ${process.env.NODE_ENV || 'development'}`);
   await testConnection();
+  startWidgetInactividadTicker();
 });
 
 // Manejo de cierre graceful
 process.on('SIGTERM', async () => {
   console.log('SIGTERM recibido, cerrando servidor...');
+  stopWidgetInactividadTicker();
   server.close(async () => {
     await closeConnection();
     process.exit(0);
@@ -272,6 +286,7 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   console.log('SIGINT recibido, cerrando servidor...');
+  stopWidgetInactividadTicker();
   server.close(async () => {
     await closeConnection();
     process.exit(0);

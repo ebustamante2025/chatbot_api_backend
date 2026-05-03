@@ -15,7 +15,10 @@
     "migrate:status": "tsx node_modules/knex/bin/cli.js migrate:status",
     "seed:run": "tsx node_modules/knex/bin/cli.js seed:run",
     "db:create": "node -r dotenv/config scripts/create-db.js",
-    "db:verify": "tsx scripts/verify-db.js"
+    "db:verify": "tsx scripts/verify-db.js",
+    "compose:dev": "docker compose --env-file .env.development up -d --build",
+    "compose:dev:tools": "docker compose --env-file .env.development --profile tools up -d --build",
+    "compose:up": "docker compose up -d --build"
   },
   "keywords": [
     "api",

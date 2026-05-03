@@ -2,6 +2,7 @@ import express from 'express';
 import { db } from '../database/connection.js';
 import { getIO } from '../socket.js';
 import { findConversacionActivaSoporte } from '../services/conversacionActivaUnica.js';
+import { CANAL_WIDGET_AGENTE } from '../services/widgetInactividad.js';
 
 const router = express.Router();
 
@@ -313,6 +314,8 @@ router.post('/', async (req, res) => {
           tema: tema || 'SOPORTE',
           estado: 'EN_COLA',
           prioridad: 'MEDIA',
+          ultima_actividad_cliente_en: db.raw('now()'),
+          inactividad_fase: 0,
         })
         .returning('*');
     } catch (insertError: unknown) {
@@ -347,6 +350,226 @@ router.post('/', async (req, res) => {
       error: 'Error interno del servidor',
       message: 'No se pudo crear la conversación',
     });
+  }
+});
+
+/** Marca estable para deduplicar solicitudes seguidas (mismo criterio en la consulta al último SISTEMA). */
+const MARCA_SOLICITUD_CIERRE_WIDGET_AGENTE = '[widget:contacto-solicita-cierre]';
+
+/** Mensaje visible en el CRM: el cliente cerró desde el widget.
+ *  No incluye la marca interna; la deduplicación la detecta por contenido. */
+const PREFIJO_SOLICITUD_CIERRE_CONTACTO =
+  `⚠️ Cierre solicitado por el cliente\n` +
+  `─────────────────────────────────\n` +
+  `El cliente cerró la conversación desde el chatbot mediante la opción "Cerrar conversación".\n\n` +
+  `✅ Acción requerida:\n` +
+  `   1. Abrir el menú de esta conversación.\n` +
+  `   2. Seleccionar "Finalizar la conversación".\n\n` +
+  `ℹ️ Una vez finalizada, el cliente podrá solicitar soporte nuevamente realizando una nueva validación con sus datos de acceso.`;
+
+/**
+ * Widget (sin JWT): el contacto pide dejar el soporte; se crea mensaje SISTEMA y se notifica al CRM / agente.
+ * No cierra la conversación: el asesor usa "Cerrar caso" en el CRM.
+ */
+router.post('/widget/:id/solicitud-cierre', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { empresa_id, contacto_id } = req.body || {};
+    if (!Number.isFinite(id) || id < 1) {
+      return res.status(400).json({ error: 'ID inválido', message: 'Conversación no válida' });
+    }
+    if (!empresa_id || !contacto_id) {
+      return res.status(400).json({
+        error: 'Datos requeridos',
+        message: 'empresa_id y contacto_id son obligatorios',
+      });
+    }
+
+    const conversacion = await db('conversaciones').where('id_conversacion', id).first();
+
+    if (!conversacion) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const empresaIdNum = Number(empresa_id);
+    const contactoIdNum = Number(contacto_id);
+    if (Number(conversacion.empresa_id) !== empresaIdNum || Number(conversacion.contacto_id) !== contactoIdNum) {
+      return res.status(403).json({
+        error: 'No autorizado',
+        message: 'Los datos no coinciden con esta conversación',
+      });
+    }
+
+    if (String(conversacion.estado) === 'CERRADA') {
+      return res.status(400).json({
+        error: 'Conversación cerrada',
+        message: 'Esta conversación ya está cerrada',
+      });
+    }
+
+    if (String(conversacion.canal || '').trim() !== CANAL_WIDGET_AGENTE) {
+      return res.status(403).json({
+        error: 'Canal no permitido',
+        message: 'Esta acción solo está disponible para el chat de soporte desde la web',
+      });
+    }
+
+    const contactoExiste = await db('contactos')
+      .where({ id_contacto: contactoIdNum, empresa_id: empresaIdNum })
+      .first();
+    if (!contactoExiste) {
+      return res.status(403).json({ error: 'Contacto no registrado' });
+    }
+
+    const ultimoSistema = await db('mensajes')
+      .where({ conversacion_id: id, tipo_emisor: 'SISTEMA' })
+      .orderBy('creado_en', 'desc')
+      .first();
+    const contenidoUltimoSistema =
+      ultimoSistema && typeof ultimoSistema.contenido === 'string' ? ultimoSistema.contenido : '';
+    const esDuplicadoRecienteSolicitudCierre =
+      contenidoUltimoSistema.includes(MARCA_SOLICITUD_CIERRE_WIDGET_AGENTE) ||
+      contenidoUltimoSistema.includes('desea finalizar el soporte') ||
+      contenidoUltimoSistema.includes('El contacto ha cerrado la conversación desde el chat') ||
+      contenidoUltimoSistema.includes('El cliente solicitó cerrar la conversación desde el chatbot') ||
+      contenidoUltimoSistema.includes('El cliente cerró la conversación desde el chatbot');
+    if (
+      ultimoSistema &&
+      contenidoUltimoSistema &&
+      esDuplicadoRecienteSolicitudCierre &&
+      Date.now() - new Date(String(ultimoSistema.creado_en)).getTime() < 120_000
+    ) {
+      return res.status(200).json({
+        message: 'Solicitud ya registrada',
+        duplicado: true,
+      });
+    }
+
+    const [inserted] = await db('mensajes')
+      .insert({
+        empresa_id: empresaIdNum,
+        conversacion_id: id,
+        tipo_emisor: 'SISTEMA',
+        contenido: PREFIJO_SOLICITUD_CIERRE_CONTACTO,
+      })
+      .returning('*');
+
+    // inactividad_fase = 99: centinela que indica "cliente solicitó cierre".
+    // El ticker de inactividad omite esta conversación para no enviar avisos ni cerrar automáticamente.
+    await db('conversaciones').where('id_conversacion', id).update({
+      ultima_actividad_en: db.raw('now()'),
+      ultima_actividad_cliente_en: db.raw('now()'),
+      inactividad_fase: 99,
+    });
+
+    const socketIO = getIO();
+    if (socketIO && inserted) {
+      const mensajeConDetalle = await db('mensajes')
+        .select(
+          'mensajes.*',
+          'contactos.nombre as contacto_nombre',
+          'usuarios_soporte.username as agente_username',
+          'usuarios_soporte.nombre_completo as agente_nombre_completo'
+        )
+        .leftJoin('contactos', 'mensajes.contacto_id', 'contactos.id_contacto')
+        .leftJoin('usuarios_soporte', 'mensajes.usuario_id', 'usuarios_soporte.id_usuario')
+        .where('mensajes.id_mensaje', (inserted as { id_mensaje: number }).id_mensaje)
+        .first();
+      const payload = mensajeConDetalle || inserted;
+      socketIO.to(`conversation:${id}`).emit('new_message', payload);
+      const asignada = conversacion.asignada_a_usuario_id as number | null | undefined;
+      if (asignada) {
+        socketIO.to(`agent:${asignada}`).emit('conversation_new_activity', {
+          id_conversacion: id,
+        });
+      }
+      socketIO.emit('bot_conversation_activity', {
+        id_conversacion: id,
+        tipo_emisor: 'SISTEMA',
+      });
+      socketIO.to('crm').emit('crm_activity', {
+        id_conversacion: id,
+        tipo_emisor: 'SISTEMA',
+      });
+    }
+
+    res.status(201).json({
+      message: 'Solicitud registrada. Un asesor podrá cerrar la conversación.',
+      mensaje: inserted,
+    });
+  } catch (error) {
+    console.error('Error en solicitud-cierre (widget):', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+/**
+ * Widget (sin JWT): el contacto escribe en el input (sin enviar); renueva el reloj de inactividad.
+ * Solo ASIGNADA/ACTIVA y canal WEB_AGENTE; no inserta mensajes.
+ */
+router.post('/widget/:id/heartbeat-actividad', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { empresa_id, contacto_id } = req.body || {};
+    if (!Number.isFinite(id) || id < 1) {
+      return res.status(400).json({ error: 'ID inválido', message: 'Conversación no válida' });
+    }
+    if (!empresa_id || !contacto_id) {
+      return res.status(400).json({
+        error: 'Datos requeridos',
+        message: 'empresa_id y contacto_id son obligatorios',
+      });
+    }
+
+    const conversacion = await db('conversaciones').where('id_conversacion', id).first();
+    if (!conversacion) {
+      return res.status(404).json({ error: 'Conversación no encontrada' });
+    }
+
+    const empresaIdNum = Number(empresa_id);
+    const contactoIdNum = Number(contacto_id);
+    if (Number(conversacion.empresa_id) !== empresaIdNum || Number(conversacion.contacto_id) !== contactoIdNum) {
+      return res.status(403).json({
+        error: 'No autorizado',
+        message: 'Los datos no coinciden con esta conversación',
+      });
+    }
+
+    if (String(conversacion.estado) === 'CERRADA') {
+      return res.status(400).json({ error: 'Conversación cerrada', message: 'Esta conversación ya está cerrada' });
+    }
+
+    if (!['ASIGNADA', 'ACTIVA'].includes(String(conversacion.estado))) {
+      return res.status(400).json({
+        error: 'Estado no válido',
+        message: 'Solo aplica cuando un asesor ya ha tomado la conversación',
+      });
+    }
+
+    if (String(conversacion.canal || '').trim() !== CANAL_WIDGET_AGENTE) {
+      return res.status(403).json({
+        error: 'Canal no permitido',
+        message: 'Esta acción solo está disponible para el chat de soporte desde la web',
+      });
+    }
+
+    const contactoExiste = await db('contactos')
+      .where({ id_contacto: contactoIdNum, empresa_id: empresaIdNum })
+      .first();
+    if (!contactoExiste) {
+      return res.status(403).json({ error: 'Contacto no registrado' });
+    }
+
+    await db('conversaciones').where('id_conversacion', id).update({
+      ultima_actividad_en: db.raw('now()'),
+      ultima_actividad_cliente_en: db.raw('now()'),
+      inactividad_fase: 0,
+    });
+
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    console.error('Error en heartbeat-actividad (widget):', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
 
@@ -386,6 +609,8 @@ router.post('/:id/asignar', async (req, res) => {
         asignada_a_usuario_id: Number(usuario_id),
         asignada_en: db.raw('now()'),
         ultima_actividad_en: db.raw('now()'),
+        ultima_actividad_cliente_en: db.raw('now()'),
+        inactividad_fase: 0,
       })
       .returning('*');
 
@@ -514,6 +739,18 @@ router.post('/:id/transferir', async (req: any, res) => {
       });
     }
 
+    const agenteOrigenRow = user
+      ? await db('usuarios_soporte')
+          .where({ id_usuario: user.id_usuario })
+          .select('username', 'nombre_completo')
+          .first()
+      : null;
+    const etiquetaOrigen =
+      (agenteOrigenRow?.nombre_completo && String(agenteOrigenRow.nombre_completo).trim()) ||
+      agenteOrigenRow?.username ||
+      user?.username ||
+      'Agente';
+
     // Actualizar la conversación: cambiar agente, volver a ASIGNADA, actualizar timestamp
     const [conversacion] = await db('conversaciones')
       .where('id_conversacion', id)
@@ -531,12 +768,14 @@ router.post('/:id/transferir', async (req: any, res) => {
       conversacion_id: conversacion.id_conversacion,
       usuario_id: Number(usuario_destino_id),
       accion: 'TRANSFERIR',
-      razon: motivo || `Transferida por ${user?.username || 'agente'}`,
+      razon: motivo || `Transferida por ${etiquetaOrigen}`,
     });
 
-    // Agregar mensaje de sistema indicando la transferencia
-    const agenteOrigen = user?.username || 'Agente';
-    const textoSistema = `🔄 Conversación transferida de ${agenteOrigen} a ${agenteDestino.nombre_completo || agenteDestino.username}${motivo ? ` — Motivo: ${motivo}` : ''}`;
+    // Agregar mensaje de sistema indicando la transferencia (nombre visible, no solo username)
+    const etiquetaDestino =
+      (agenteDestino.nombre_completo && String(agenteDestino.nombre_completo).trim()) ||
+      agenteDestino.username;
+    const textoSistema = `🔄 Conversación transferida de ${etiquetaOrigen} a ${etiquetaDestino}${motivo ? ` — Motivo: ${motivo}` : ''}`;
     await db('mensajes').insert({
       empresa_id: conversacion.empresa_id,
       conversacion_id: Number(id),

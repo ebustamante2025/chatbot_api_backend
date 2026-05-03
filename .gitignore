@@ -12,6 +12,10 @@ build/
 .env
 .env.local
 .env.*.local
+.env.development
+.env.production
+!.env.development.example
+!.env.production.example
 
 # IDE
 .vscode/
@@ -31,3 +35,6 @@ logs/
 # Database
 *.sqlite
 *.db
+
+# Config generado en runtime
+menus-wid-config.json
