@@ -8,13 +8,10 @@
 import { MENSAJES_VALIDACION } from '../data/mensajesValidacion.js';
 
 const LICENCIA_API_URL =
-   process.env.LICENCIA_API_URL ||
-  'http://atila.hgi.com.co:8880/HGInetSecurityLicencia/Api/HelpHGIApiController/ValidarLicencia';
-
-/**  
   process.env.LICENCIA_API_URL ||
-  'https://licensing.hginet.com.co/HGInetSecurityLicencia/Api/HelpHGIApiController/ValidarLicencia';
-  **/
+  'https://licensing.hginet.com.co/Api/HelpHGIApiController/ValidarLicencia';
+
+const CODIGO_CONTRATO_MIN = 101;
 
 
 export interface ContratoVigente {
@@ -91,6 +88,13 @@ function extraerNotificacionMensaje(raw: any): string | undefined {
   if (!notif) return undefined;
   const msg = notif.Mensaje ?? notif.mensaje ?? notif.d2p1?.Mensaje;
   return msg ? String(msg) : undefined;
+}
+
+function filtrarContratosPorCodigo(contratos: ContratoVigente[]): ContratoVigente[] {
+  return contratos.filter((c) => {
+    const codigo = parseInt(c.Codigo, 10);
+    return !isNaN(codigo) && codigo >= CODIGO_CONTRATO_MIN;
+  });
 }
 
 function extraerTag(xml: string, tagName: string): string[] {
@@ -197,8 +201,11 @@ export async function validarLicencia(nit: string): Promise<ValidarLicenciaResul
       }
       // XML válido: extraer ClienteNombre, ContratoVigente y ContactoCliente
       const clienteNombreXml = extraerTag(text, 'ClienteNombre')[0]?.trim() || undefined;
-      const contratosXml = extraerContratosDesdeXml(text);
+      const contratosXml = filtrarContratosPorCodigo(extraerContratosDesdeXml(text));
       const contactosXml = extraerContactosDesdeXml(text);
+      if (contratosXml.length === 0) {
+        return { valida: false, mensaje: MENSAJES_VALIDACION.sinLicenciasXml };
+      }
       return {
         valida: true,
         permiteSoporte: true,
@@ -223,7 +230,9 @@ export async function validarLicencia(nit: string): Promise<ValidarLicenciaResul
 
   const notificacionMensaje = extraerNotificacionMensaje(data);
   const permiteSoporte = data.PermiteSoporte ?? data.permiteSoporte ?? false;
-  const contratos = normalizarContratosVigentes(data.ContratosVigentes ?? data.contratosVigentes);
+  const contratos = filtrarContratosPorCodigo(
+    normalizarContratosVigentes(data.ContratosVigentes ?? data.contratosVigentes)
+  );
   const contactos = normalizarContactosClientes(data.ContactosClientes ?? data.contactosClientes);
 
   if (notificacionMensaje || !permiteSoporte || contratos.length === 0) {
