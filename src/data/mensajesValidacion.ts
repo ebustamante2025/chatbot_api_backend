@@ -8,7 +8,9 @@ export const MENSAJES_VALIDACION = {
   sinLicenciasXml: 'En este momento no cuenta con licencias válidas para continuar con soporte en línea. Si tiene dudas o necesita validar su licencia, contacte a Servicio al Cliente.',
   respuestaNoReconocida: 'Respuesta de la API de licencias no reconocida.',
   errorConexion: 'Error al conectar con el servicio de licencias. Intente más tarde.',
-  noSeEncontraronLicencias: 'Su empresa no cuenta con licencias activas para usar el soporte en línea en este momento. Para validar o activar su licencia, contacte a Servicio al Cliente.',
-  clienteSinLicencia: 'Su empresa no cuenta con licencias activas para usar el soporte en línea. Para más información, contacte a Servicio al Cliente.',
+  noSeEncontraronLicencias:
+    'Actualmente su empresa no cuenta con licencias activas para acceder al soporte en línea.\n\nPara validar el estado de la licencia o gestionar su activación, por favor comuníquese con el área de Servicio al Cliente.',
+  clienteSinLicencia:
+    'Actualmente su empresa no cuenta con licencias activas para acceder al soporte en línea.\n\nPara validar el estado de la licencia o gestionar su activación, por favor comuníquese con el área de Servicio al Cliente.',
   nitObligatorio: 'El NIT es obligatorio',
 } as const

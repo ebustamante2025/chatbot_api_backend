@@ -19,6 +19,8 @@ import faqAccesoRouter from './routes/faq-acceso.js';
 import ia360DocRouter from './routes/ia360-doc.js';
 import dashboardRouter from './routes/dashboard.js';
 import adminWidgetPoliticasInactividadRouter from './routes/admin-widget-politicas-inactividad.js';
+import adminWidgetHorarioAgenteRouter from './routes/admin-widget-horario-agente.js';
+import widgetHorarioAgentePublicRouter from './routes/widget-horario-agente-public.js';
 import webhookProxyRouter from './routes/webhook-proxy.js';
 import telegramRouter from './routes/telegram.js';
 import menusWidRouter from './routes/menus-wid.js';
@@ -137,6 +139,9 @@ app.use('/api/empresas', empresasRouter);
 // Menús del widget (público: GET, admin: PUT)
 app.use('/api/menus-wid', menusWidRouter);
 
+// Horario agente humano (widget): disponibilidad pública
+app.use('/api/widget/horario-agente', widgetHorarioAgentePublicRouter);
+
 // Rutas de contactos
 app.use('/api/contactos', contactosRouter);
 
@@ -170,6 +175,9 @@ app.use('/api/dashboard', authMiddleware, dashboardRouter);
 
 // Política global widget (inactividad): solo ADMIN, JWT
 app.use('/api/admin/widget-politicas-inactividad', authMiddleware, adminWidgetPoliticasInactividadRouter);
+
+// Horario agente (widget): solo ADMIN, JWT
+app.use('/api/admin/widget-horario-agente', authMiddleware, adminWidgetHorarioAgenteRouter);
 
 // Temas de preguntas frecuentes: GET público (frontend FAQ), POST/PUT/DELETE requiere token
 app.use('/api/temas-preguntas', (req, res, next) => {

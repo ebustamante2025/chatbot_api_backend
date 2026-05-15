@@ -3,6 +3,7 @@ import { db } from '../database/connection.js';
 import { getIO } from '../socket.js';
 import { findConversacionActivaSoporte } from '../services/conversacionActivaUnica.js';
 import { CANAL_WIDGET_AGENTE } from '../services/widgetInactividad.js';
+import { evaluarDisponibilidadAgenteHumano } from '../services/horarioAgenteWidget.js';
 
 const router = express.Router();
 
@@ -302,6 +303,20 @@ router.post('/', async (req, res) => {
         message: 'Conversación existente',
         conversacion: { ...existente, mensajes },
       });
+    }
+
+    if (canalNorm === CANAL_WIDGET_AGENTE) {
+      const disp = await evaluarDisponibilidadAgenteHumano();
+      if (!disp.disponible) {
+        return res.status(403).json({
+          error: 'FUERA_HORARIO_AGENTE',
+          code: 'FUERA_HORARIO_AGENTE',
+          message: disp.mensaje.replace(/\*\*/g, ''),
+          disponible: false,
+          razon: disp.razon,
+          codigo_detalle: disp.codigo,
+        });
+      }
     }
 
     let conversacion: Record<string, unknown> | undefined;
